@@ -210,6 +210,6 @@ and multi-user sharing. The schema already has room for all of them.
 ## Releasing
 
 PyPI package `koro-learn` (the name `koro` was taken). Bump `version` in `pyproject.toml`
-and `koro/__init__.py`, then push a matching tag: `git tag v0.2.1 && git push origin v0.2.1`.
+and `koro/__init__.py` and push to main (a `v*` tag works too).
 `.github/workflows/publish.yml` runs the tests, builds, and publishes with PyPI trusted
-publishing (no token stored).
+publishing (no token stored); a version already on PyPI is skipped.

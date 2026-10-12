@@ -1,11 +1,14 @@
-# Publishes koro-learn to PyPI when a version tag (v0.2.0, ...) is pushed.
-# Uses PyPI trusted publishing: no API token is stored anywhere. One-time setup on
-# pypi.org: add a (pending) publisher for project "koro-learn", owner "ninadkale98",
+# Publishes koro-learn to PyPI. Releasing = bump `version` in pyproject.toml and push to
+# main (or push a v* tag, or run it by hand). Versions already on PyPI are skipped, so
+# re-runs are harmless. Uses PyPI trusted publishing: no API token is stored anywhere.
+# One-time setup on pypi.org: a publisher for project "koro-learn", owner "ninadkale98",
 # repository "koro", workflow "publish.yml", environment "pypi".
 name: publish
 
 on:
   push:
+    branches: [main]
+    paths: ["pyproject.toml", ".github/workflows/publish.yml"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -47,3 +50,5 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
