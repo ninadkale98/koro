@@ -1,0 +1,12 @@
+{
+  "name": "koro-marketplace",
+  "description": "Koro: a headless teacher agent for books, papers and repos.",
+  "owner": { "name": "Ninad Kale" },
+  "plugins": [
+    {
+      "name": "koro",
+      "source": "./plugin",
+      "description": "Learn books, papers and repos from any terminal with your coding agent as the teacher."
+    }
+  ]
+}

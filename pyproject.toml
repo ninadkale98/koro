@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "koro"
+version = "0.1.0"
+description = "A headless teacher agent: learn books, papers and repos from any terminal, driven by the coding agent you already use."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Ninad Kale" }]
+dependencies = ["pypdf>=4.0"]
+
+[project.scripts]
+koro = "koro.cli:main"
+
+[tool.setuptools]
+packages = ["koro"]
+
+[tool.setuptools.package-data]
+koro = ["data/*.md"]
