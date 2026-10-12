@@ -298,8 +298,7 @@ def _figure_libs():
         import pdfplumber  # noqa: F401
         import pypdfium2  # noqa: F401
     except ImportError:
-        raise KoroError("figures need pdfplumber: pip install --upgrade 'koro @ git+https://github.com/ninadkale98/koro' "
-                        "(or pip install pdfplumber)") from None
+        raise KoroError("figures need pdfplumber: pip install --upgrade koro-learn (or pip install pdfplumber)") from None
     from . import figures
     return figures
 

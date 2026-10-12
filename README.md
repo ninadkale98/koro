@@ -23,8 +23,9 @@ and all 85 figures mapped to the lesson beat that explains them. Your learner pr
    API Keys → a secret key (`sb_secret_...`). The legacy `service_role` key works too.
 2. **Install the CLI** (Python 3.9+):
    ```bash
-   pip install --upgrade git+https://github.com/ninadkale98/koro
-   # or: pipx install --force git+https://github.com/ninadkale98/koro
+   pip install --upgrade koro-learn          # the command is still `koro`
+   # or: pipx install koro-learn
+   # or, straight from GitHub: pip install --upgrade git+https://github.com/ninadkale98/koro
    ```
 3. **Connect:**
    ```bash
@@ -204,4 +205,11 @@ Apply `supabase/migrations/*.sql` in filename order (`supabase link --project-re
 ## Not built yet
 
 The exercise runner (Fly.io containers), OAuth for the connector, cross-book topic linking,
-publishing to PyPI, and multi-user sharing. The schema already has room for all of them.
+and multi-user sharing. The schema already has room for all of them.
+
+## Releasing
+
+PyPI package `koro-learn` (the name `koro` was taken). Bump `version` in `pyproject.toml`
+and `koro/__init__.py`, then push a matching tag: `git tag v0.2.1 && git push origin v0.2.1`.
+`.github/workflows/publish.yml` runs the tests, builds, and publishes with PyPI trusted
+publishing (no token stored).

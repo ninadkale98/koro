@@ -21,7 +21,7 @@ Arguments: $ARGUMENTS
 - `add <file>` → see "Adding a source" · `ingest` → see "Parsing a source"
 - anything else ("teach me attention", "quiz me on chapter 3"): find it with `koro search`, then teach it.
 
-If `koro` is missing, install it: `pip install git+https://github.com/ninadkale98/koro` then
+If `koro` is missing, install it: `pip install koro-learn` (the command is `koro`) then
 `koro init`. If it is installed but can't reach the database, see "Fallback" at the end.
 
 ## The session loop
