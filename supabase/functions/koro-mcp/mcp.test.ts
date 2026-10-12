@@ -38,6 +38,28 @@ const SIGNATURES: Record<string, string[]> = {
   koro_save_item: ["p_learner", "p_title", "p_kind", "p_body", "p_url", "p_tags", "p_context", "p_client"],
   koro_saved_items: ["p_learner", "p_status", "p_tag", "p_query", "p_limit"],
   koro_update_saved_item: ["p_learner", "p_ref", "p_status", "p_title", "p_note", "p_add_tags", "p_remove_tags", "p_entity"],
+  koro_capture: ["p_learner", "p_title", "p_kind", "p_body", "p_url", "p_tags", "p_context", "p_client", "p_page"],
+  koro_set_saved_text: ["p_learner", "p_ref", "p_title", "p_body"],
+  koro_notebook: ["p_learner", "p_ref", "p_items", "p_all"],
+  koro_page: ["p_learner", "p_ref", "p_full"],
+  koro_page_section: ["p_learner", "p_ref", "p_section"],
+  koro_page_history: ["p_learner", "p_ref"],
+  koro_page_write: ["p_learner", "p_ref", "p_op", "p_text", "p_section", "p_find", "p_if_version", "p_client"],
+  koro_page_restore: ["p_learner", "p_ref", "p_version", "p_client"],
+  koro_page_create: ["p_learner", "p_title", "p_parent", "p_after", "p_body", "p_tags", "p_client"],
+  koro_page_update: ["p_learner", "p_ref", "p_title", "p_status", "p_add_tags", "p_remove_tags"],
+  koro_page_move: ["p_learner", "p_ref", "p_parent", "p_after", "p_top"],
+  koro_file_items: ["p_learner", "p_items", "p_page"],
+};
+// Parameters without a default: the rpc must always send them (makeRpc drops null/undefined).
+const REQUIRED: Record<string, string[]> = {
+  koro_set_saved_text: ["p_learner", "p_ref", "p_title", "p_body"],
+  koro_file_items: ["p_learner", "p_items", "p_page"],
+  koro_page_section: ["p_learner", "p_ref", "p_section"],
+  koro_page_write: ["p_learner", "p_ref", "p_op"],
+  koro_page_restore: ["p_learner", "p_ref", "p_version"],
+  koro_page_create: ["p_learner", "p_title"],
+  koro_page_move: ["p_learner", "p_ref"],
 };
 
 const FIG = { asset_id: "f1", label: "2.13", caption: "A roofline chart.", page: 65, bbox: [1, 2, 3, 4],
@@ -96,6 +118,7 @@ const CANNED: Record<string, unknown> = {
   koro_saved_items: {
     items: [{ no: 12, id: "s12", kind: "url", title: "PagedAttention", url: "https://arxiv.org/abs/2309.06180",
               tags: ["papers"], status: "inbox", body: "block tables", context: { client: "cli", device: "lab" },
+              page: { number: "1.1", title: "Signals" },
               created_at: "2026-10-12T18:00:00Z" },
             { no: 13, id: "s13", kind: "pdf", title: "flash.pdf", tags: [], status: "planned", context: {},
               file: { filename: "flash.pdf", bucket: "koro-private", storage_path: "saved/L/13-flash.pdf" },
@@ -103,6 +126,21 @@ const CANNED: Record<string, unknown> = {
     counts: { inbox: 1, planned: 1, learning: 0, done: 0, archived: 0 }, tags: [{ tag: "papers", n: 1 }],
   },
   koro_update_saved_item: { no: 12, status: "done" },
+  koro_capture: { no: 12, title: "PagedAttention", status: "inbox", existed: false },
+  koro_set_saved_text: { no: 12, title: "EINTR", body: "rewritten" },
+  koro_notebook: { pages: [{ number: "1", depth: 0, title: "Linux internals", status: "inbox", tags: [], items: 0, has_writeup: false },
+                           { number: "1.1", depth: 1, title: "Signals", status: "learning", tags: ["linux"], items: 2, has_writeup: true }],
+                   inbox: { items: 3 }, scope: null },
+  koro_page: { number: "1.1", title: "Signals", version: 4, body: "## EINTR\nRetry.", headings: [{ heading: "EINTR", level: 2 }],
+               subpages: [], item_list: [], path: [{ number: "1", title: "Linux internals" }] },
+  koro_page_section: { heading: "EINTR", text: "Retry.", version: 4 },
+  koro_page_history: { number: "1.1", history: [{ version: 3 }] },
+  koro_page_write: { number: "1.1", version: 5, changed: true },
+  koro_page_restore: { number: "1.1", version: 5, changed: true },
+  koro_page_create: { number: "1.2", title: "Real-time signals", existed: false },
+  koro_page_update: { number: "1.1", status: "done" },
+  koro_page_move: { number: "2" },
+  koro_file_items: { page: { number: "1.1", title: "Signals" }, items: [{ no: 3 }, { no: 4 }] },
 };
 
 function setup(overrides: Record<string, unknown> = {}, storage?: Storage) {
@@ -112,6 +150,7 @@ function setup(overrides: Record<string, unknown> = {}, storage?: Storage) {
     const sig = SIGNATURES[fn];
     assert.ok(sig, `unexpected rpc ${fn}`);
     for (const k of Object.keys(params)) assert.ok(sig.includes(k), `${fn} has no parameter ${k}`);
+    for (const k of REQUIRED[fn] ?? []) assert.ok(params[k] !== undefined && params[k] !== null, `${fn} needs ${k}`);
     // makeRpc drops undefined (and null) before sending; record what would be sent, keeping nulls visible
     calls.push([fn, Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined))]);
     const r = responses[fn];
@@ -327,6 +366,7 @@ test("GET: status page, selftest, and no SSE stream", async () => {
   assert.equal(st.selftest.tools, TOOLS.length);
   assert.equal(st.selftest.next_concept.isError, false);
   assert.equal(st.selftest.table_of_contents.isError, false);
+  assert.equal(st.selftest.notebook_toc.isError, false);
   const sse = await handler(new Request(BASE, { headers: { Accept: "text/event-stream" } }));
   assert.equal(sse.status, 405);
   assert.equal((await handler(new Request(BASE, { method: "DELETE" }))).status, 405);
@@ -477,14 +517,14 @@ test("save_for_later: links, titled topics and tags", async () => {
   const p = payload(await call("save_for_later", { what: "https://arxiv.org/abs/2309.06180", title: "PagedAttention",
     note: "came up while reading 5.3", tags: ["papers", "kv-cache"] }));
   assert.equal(p.no, 12);
-  assert.deepEqual(last("koro_save_item"), { p_learner: L, p_title: "PagedAttention", p_kind: "url",
+  assert.deepEqual(last("koro_capture"), { p_learner: L, p_title: "PagedAttention", p_kind: "url",
     p_body: "came up while reading 5.3", p_url: "https://arxiv.org/abs/2309.06180", p_tags: ["papers", "kv-cache"],
     p_context: {}, p_client: "connector" });
   await call("save_for_later", { what: "https://x.io/flash.pdf" });
-  assert.equal(last("koro_save_item").p_kind, "pdf");
-  assert.equal(last("koro_save_item").p_title, undefined);
+  assert.equal(last("koro_capture").p_kind, "pdf");
+  assert.equal(last("koro_capture").p_title, undefined);
   await call("save_for_later", { what: "how does the scheduler decide what to preempt?", title: "Preemption" });
-  const t = last("koro_save_item");
+  const t = last("koro_capture");
   assert.equal(t.p_title, "Preemption");
   assert.equal(t.p_body, "how does the scheduler decide what to preempt?");
   assert.equal(t.p_url, undefined);
@@ -503,6 +543,8 @@ test("list_saved: compact items, file links, filters", async () => {
   assert.equal(p.items[0].from, "cli");
   assert.equal(p.items[0].file_link, null);
   assert.equal(p.items[1].file, "flash.pdf");
+  assert.equal(p.items[0].page, "1.1 Signals");
+  assert.equal(p.items[1].page, "inbox");
   assert.match(p.items[1].file_link, /koro-private\/saved\/L\/13-flash\.pdf\?token=t/);
   assert.equal(JSON.stringify(p).includes("storage_path"), false);
   await call("list_saved", { status: "all", search: "attention", limit: 10 });
@@ -516,4 +558,135 @@ test("update_saved moves an item along", async () => {
     p_add_tags: ["read"] });
   const bad = await call("update_saved", { item: "twelve" });
   assert.match(bad.result.content[0].text, /item must be an integer/);
+});
+
+test("save_for_later can go straight onto a page", async () => {
+  const { call, last } = setup();
+  await call("save_for_later", { what: "EINTR retry loop", note: "```c\nwhile (...) {}\n```", kind: "snippet", page: "signals" });
+  const sent = last("koro_capture");
+  assert.equal(sent.p_page, "signals");
+  assert.equal(sent.p_kind, "snippet");
+  assert.match(String(sent.p_body), /while/);
+});
+
+test("update_saved can rewrite a note as a whole", async () => {
+  const { call, last, calls } = setup();
+  await call("update_saved", { item: 12, replace_note: "new note" });
+  assert.deepEqual(last("koro_set_saved_text"), { p_learner: L, p_ref: "12", p_title: "", p_body: "new note" });
+  assert.equal(calls.some((c) => c[0] === "koro_update_saved_item"), false);
+  await call("update_saved", { item: 12, replace_note: "x", title: "T", status: "planned" });
+  assert.equal(last("koro_set_saved_text").p_title, "T");
+  assert.equal(last("koro_update_saved_item").p_status, "planned");
+});
+
+test("notebook_toc: the outline, a branch with items, and an empty notebook", async () => {
+  const { call, last } = setup();
+  const p = payload(await call("notebook_toc"));
+  assert.deepEqual(last("koro_notebook"), { p_learner: L, p_items: false, p_all: false });
+  assert.equal(p.pages[1].number, "1.1");
+  assert.equal(p.inbox.items, 3);
+  await call("notebook_toc", { page: "1.1", items: true, include_archived: true });
+  assert.deepEqual(last("koro_notebook"), { p_learner: L, p_ref: "1.1", p_items: true, p_all: true });
+  const empty = payload(await setup({ koro_notebook: { pages: [], inbox: { items: 1 } } }).call("notebook_toc"));
+  assert.match(empty.note, /create_page/);
+});
+
+test("read_page: whole page, one section, history", async () => {
+  const { call, last } = setup();
+  const p = payload(await call("read_page", { page: "1.1" }));
+  assert.deepEqual(last("koro_page"), { p_learner: L, p_ref: "1.1", p_full: false });
+  assert.equal(p.version, 4);
+  await call("read_page", { page: "signals", full: true });
+  assert.equal(last("koro_page").p_full, true);
+  const sec = payload(await call("read_page", { page: "1.1", section: "EINTR" }));
+  assert.deepEqual(last("koro_page_section"), { p_learner: L, p_ref: "1.1", p_section: "EINTR" });
+  assert.equal(sec.text, "Retry.");
+  await call("read_page", { page: "1.1", history: true });
+  assert.deepEqual(last("koro_page_history"), { p_learner: L, p_ref: "1.1" });
+  assert.match((await call("read_page", {})).result.content[0].text, /missing required argument: page/);
+});
+
+test("write_page: each op sends only what it needs; bad combinations never reach the database", async () => {
+  const { call, last, calls } = setup();
+  await call("write_page", { page: "1.1", op: "append", text: "more", section: "EINTR", if_version: 4 });
+  assert.deepEqual(last("koro_page_write"), { p_learner: L, p_ref: "1.1", p_op: "append", p_text: "more", p_section: "EINTR",
+    p_if_version: 4, p_client: "connector" });
+  await call("write_page", { page: "1.1", op: "replace_section", text: "new", section: "EINTR" });
+  assert.equal(last("koro_page_write").p_section, "EINTR");
+  await call("write_page", { page: "1.1", op: "replace_text", find: "any thread", text: "any one thread", section: "ignored" });
+  const rt = last("koro_page_write");
+  assert.equal(rt.p_find, "any thread");
+  assert.equal(rt.p_section, undefined);
+  await call("write_page", { page: "1.1", op: "replace", text: "" });
+  assert.equal(last("koro_page_write").p_text, "");
+  const n = calls.length;
+  for (const [args, msg] of [
+    [{ page: "1.1", op: "append" }, /append needs text/],
+    [{ page: "1.1", op: "replace_section", text: "x" }, /needs section/],
+    [{ page: "1.1", op: "replace_text", text: "x" }, /needs find/],
+    [{ page: "1.1", op: "restore" }, /needs version/],
+    [{ page: "1.1", op: "delete" }, /op must be one of/],
+  ] as [Record<string, unknown>, RegExp][]) {
+    const r = await call("write_page", args);
+    assert.equal(r.result.isError, true);
+    assert.match(r.result.content[0].text, msg);
+  }
+  assert.equal(calls.length, n);
+});
+
+test("write_page restore checks if_version first", async () => {
+  const { call, last } = setup();
+  await call("write_page", { page: "1.1", op: "restore", version: 2, if_version: 4 });
+  assert.deepEqual(last("koro_page_restore"), { p_learner: L, p_ref: "1.1", p_version: 2, p_client: "connector" });
+  const stale = setup();
+  const r = await stale.call("write_page", { page: "1.1", op: "restore", version: 2, if_version: 3 });
+  assert.match(r.result.content[0].text, /changed since you read it/);
+  assert.equal(stale.calls.some((c) => c[0] === "koro_page_restore"), false);
+});
+
+test("write_page surfaces a version conflict from the database", async () => {
+  const { call } = setup({ koro_page_write: new Error('koro_page_write: page "Signals" changed since you read it (you had version 3, it is now 4)') });
+  const r = await call("write_page", { page: "1.1", op: "append", text: "x", if_version: 3 });
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.content[0].text, /read it/);
+});
+
+test("create_page, update_page, move_page, file_items", async () => {
+  const { call, last, calls } = setup();
+  const created = payload(await call("create_page", { title: "Real-time signals", parent: "1.1", after: "1.1.1", text: "intro", tags: ["linux"] }));
+  assert.equal(created.number, "1.2");
+  assert.deepEqual(last("koro_page_create"), { p_learner: L, p_title: "Real-time signals", p_parent: "1.1", p_after: "1.1.1",
+    p_body: "intro", p_tags: ["linux"], p_client: "connector" });
+  await call("create_page", { title: "Inference" });
+  assert.deepEqual(last("koro_page_create"), { p_learner: L, p_title: "Inference", p_tags: [], p_client: "connector" });
+  await call("update_page", { page: "1.1", title: "Unix signals", status: "done", add_tags: ["x"], remove_tags: ["y"] });
+  assert.deepEqual(last("koro_page_update"), { p_learner: L, p_ref: "1.1", p_title: "Unix signals", p_status: "done",
+    p_add_tags: ["x"], p_remove_tags: ["y"] });
+  await call("move_page", { page: "2", parent: "1.1" });
+  assert.deepEqual(last("koro_page_move"), { p_learner: L, p_ref: "2", p_parent: "1.1", p_top: false });
+  await call("move_page", { page: "1.1.4", top: true });
+  assert.deepEqual(last("koro_page_move"), { p_learner: L, p_ref: "1.1.4", p_top: true });
+  const n = calls.length;
+  assert.match((await call("move_page", { page: "2" })).result.content[0].text, /exactly one of parent, after or top/);
+  assert.match((await call("move_page", { page: "2", parent: "1", top: true })).result.content[0].text, /exactly one/);
+  assert.equal(calls.length, n);
+  const filed = payload(await call("file_items", { items: [3, 4], page: "signals" }));
+  assert.deepEqual(last("koro_file_items"), { p_learner: L, p_items: ["3", "4"], p_page: "signals" });
+  assert.equal(filed.items.length, 2);
+  await call("file_items", { items: [3], page: "inbox" });
+  assert.equal(last("koro_file_items").p_page, "inbox");
+  assert.match((await call("file_items", { items: ["#3"], page: "1" })).result.content[0].text, /list of whole numbers/);
+  assert.match((await call("file_items", { items: [3] })).result.content[0].text, /missing required argument: page/);
+  assert.match((await call("file_items", { items: [], page: "1" })).result.content[0].text, /items is empty/);
+});
+
+test("the notebook prompt and instructions", async () => {
+  const { post } = setup();
+  const got = (await post({ jsonrpc: "2.0", id: 2, method: "prompts/get", params: { name: "notebook", arguments: {} } })).body.result;
+  assert.match(got.messages[0].content.text, /notebook_toc/);
+  const page = (await post({ jsonrpc: "2.0", id: 3, method: "prompts/get", params: { name: "notebook", arguments: { page: "1.1" } } })).body.result;
+  assert.match(page.messages[0].content.text, /read_page/);
+  for (const tool of ["notebook_toc", "read_page", "write_page", "create_page", "file_items", "update_page", "if_version"]) {
+    assert.ok(INSTRUCTIONS.includes(tool), tool);
+  }
 });

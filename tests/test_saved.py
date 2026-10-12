@@ -27,7 +27,7 @@ def answers(**over):
                     tags=body.get("p_tags") or [], existed=False)
 
     base = {
-        "koro_save_item": save,
+        "koro_capture": save,
         "koro_attach_saved_file": lambda body, n: item(kind="pdf", title="paper.pdf", file={
             "filename": body["p_filename"], "bucket": body["p_bucket"], "storage_path": body["p_storage_path"]}),
         "koro_saved_items": {"items": [item(), item(no=8, kind="url", title="vLLM blog", url="https://x.io/b",
@@ -74,7 +74,7 @@ class SavedTest(unittest.TestCase):
         code, out, _, rec, _ = self.run_cli("save", "paged", "attention", "internals", "-n", "saw it in vLLM",
                                             "-t", "gpu,serving", "--tag", "#kv-cache")
         self.assertEqual(code, 0, out)
-        body = rec.last("koro_save_item")
+        body = rec.last("koro_capture")
         self.assertEqual(body["p_title"], "paged attention internals")
         self.assertEqual(body["p_body"], "saw it in vLLM")
         self.assertEqual(body["p_tags"], ["gpu", "serving", "#kv-cache"])
@@ -82,18 +82,18 @@ class SavedTest(unittest.TestCase):
         self.assertNotIn("repo", body["p_context"])  # repo/folder only with --here
         self.assertEqual(body["p_client"], "cli")
         self.assertNotIn("p_kind", body)  # the database decides topic vs question
-        self.assertIn("Saved #7: paged attention internals", out)
+        self.assertIn("Saved #7 to your inbox: paged attention internals", out)
 
     def test_save_a_link_looks_up_its_title(self):
         code, out, _, rec, _ = self.run_cli("save", "https://arxiv.org/abs/2309.06180", "--json")
-        body = rec.last("koro_save_item")
+        body = rec.last("koro_capture")
         self.assertEqual(body["p_url"], "https://arxiv.org/abs/2309.06180")
         self.assertEqual(body["p_kind"], "url")
         self.assertEqual(body["p_title"], "Efficient Memory Management for LLM Serving")
         self.fetch.reset_mock()
         code, out, _, rec, _ = self.run_cli("save", "https://x.io/paper.pdf", "--no-fetch")
         self.fetch.assert_not_called()
-        self.assertEqual((rec.last("koro_save_item")["p_kind"], rec.last("koro_save_item")["p_title"]),
+        self.assertEqual((rec.last("koro_capture")["p_kind"], rec.last("koro_capture")["p_title"]),
                          ("pdf", "https://x.io/paper.pdf"))
 
     def test_save_a_file_uploads_it_privately(self):
@@ -102,8 +102,8 @@ class SavedTest(unittest.TestCase):
             fh.write(b"%PDF-1.4 tiny")
         code, out, err, rec, store = self.run_cli("save", path, "-n", "for the tiling trick", "--json")
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(rec.last("koro_save_item")["p_kind"], "pdf")
-        self.assertEqual(rec.last("koro_save_item")["p_title"], "flash attention.pdf")
+        self.assertEqual(rec.last("koro_capture")["p_kind"], "pdf")
+        self.assertEqual(rec.last("koro_capture")["p_title"], "flash attention.pdf")
         (up_path, mime, size), = store.uploads()
         self.assertEqual(up_path, f"object/koro-private/saved/{L}/7-flash-attention.pdf")
         self.assertEqual((mime, size), ("application/pdf", 13))
@@ -113,7 +113,7 @@ class SavedTest(unittest.TestCase):
     def test_save_a_snippet_from_stdin(self):
         code, out, _, rec, _ = self.run_cli("save", "-", "-n", "why is this lock-free?",
                                             stdin="\n  atomic_fetch_add(&q->tail, 1);\n  more();\n")
-        body = rec.last("koro_save_item")
+        body = rec.last("koro_capture")
         self.assertEqual(body["p_kind"], "snippet")
         self.assertEqual(body["p_title"], "atomic_fetch_add(&q->tail, 1);")
         self.assertTrue(body["p_body"].startswith("why is this lock-free?\n\n"))
@@ -124,7 +124,7 @@ class SavedTest(unittest.TestCase):
     def test_long_thought_becomes_a_note(self):
         thought = "why " + "does the scheduler preempt sequences " * 8
         code, out, _, rec, _ = self.run_cli("save", thought)
-        body = rec.last("koro_save_item")
+        body = rec.last("koro_capture")
         self.assertEqual(body["p_kind"], "note")
         self.assertTrue(body["p_title"].endswith("…") and len(body["p_title"]) <= 81)
         self.assertEqual(body["p_body"], thought.strip())
@@ -135,7 +135,7 @@ class SavedTest(unittest.TestCase):
             run.side_effect = [mock.Mock(returncode=0, stdout="/work/dsp-kernel\n"),
                                mock.Mock(returncode=0, stdout="pddump\n")]
             self.run_cli("save", "qdi refcounting", "--here", recorder=rec)
-        ctx = rec.last("koro_save_item")["p_context"]
+        ctx = rec.last("koro_capture")["p_context"]
         self.assertEqual((ctx["repo"], ctx["branch"]), ("dsp-kernel", "pddump"))
         self.assertIn("cwd", ctx)
 

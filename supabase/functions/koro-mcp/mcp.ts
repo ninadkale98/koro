@@ -20,7 +20,7 @@ export type Deps = {
   now?: () => Date;
 };
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 const LINK_SECONDS = 3600; // signed figure links last an hour; show_figure makes a fresh one
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,6 +39,8 @@ Session loop
 6. next_concept and repeat. Every few concepts and at the end of the session, call save_learner_summary with 2-3 sentences on where they stand.
 
 Saving for later: while the learner is working or chatting, they may want to keep something to learn properly later ("save this to koro", "I want to learn X later", a link or paper). Call save_for_later right away with a clear title, the URL if there is one, a one-line note on why it came up, and 1-3 short tags; confirm in one line with its number (#12) and carry on. "What did I save?" -> list_saved, then summarize by theme instead of reading the list out. Move items along with update_saved (planned, learning, done, archived). Save ideas and public links, not proprietary code or internal documents.
+
+Notebook: saved things live on pages that nest (numbered 1, 1.1, 1.1.2); items without a page wait in the inbox. Each page has a markdown write-up and holds items. Before saving onto a page or writing, call notebook_toc and pick the page that fits (save_for_later with page, or file_items later). If none fits, propose a new page and where it goes before create_page, unless the learner already said where. Read with read_page (the whole page, or one section by its heading). Change only the part you mean with write_page: append (optionally under a section), replace_section, or replace_text; replace the whole write-up only when the learner asked for a rewrite. Pass if_version from your read; if the edit is refused because the page changed, read it again and redo the edit. Write markdown with ## headings for parts the learner may want to target later. Nothing is deleted: archive pages with update_page; earlier write-ups come back with write_page op restore.
 
 When the learner says: "I already know this" -> mark_known, then offer a one-question confirm. "My answer was right" -> dispute_verdict (assessment_id comes from record_answer). "Jump to 5.3" -> start_book(section "5.3"). "Where is X covered?" -> search_book. "How am I doing?" -> progress_report. Pause, finish or drop a book -> set_book_status. Start over -> confirm first, then restart_book(confirm true). Goals -> set_goal. Time studied -> study_time.
 In voice or on mobile keep beats even shorter and ask one question at a time.`;
@@ -75,6 +77,12 @@ type Tool = {
 const URL_RE = /^https?:\/\/\S+$/i;
 const TAGS = { type: "array", items: { type: "string" }, description: "1-3 short topic tags, e.g. [\"gpu\", \"kv-cache\"]." };
 const SAVED_STATUS = ["inbox", "planned", "learning", "done", "archived"];
+const PAGE = {
+  type: "string",
+  description: "A notebook page: its number from notebook_toc (\"1.2\"), its name or a unique part of it, or a slug path (\"linux-internals/signals\").",
+};
+const WRITE_OPS = ["append", "replace_section", "replace_text", "replace", "restore"];
+const brief = (p: any) => (p ? `${p.number} ${p.title}` : null);
 
 const BOOK = { type: "string", description: "Book, paper or repo: title (or part of it) or id. Defaults to the most recent one." };
 const SECTION = { type: "string", description: "Section key from the table of contents, e.g. \"5.3\" or \"2.4.1\"." };
@@ -427,29 +435,31 @@ export const TOOLS: Tool[] = [
   {
     name: "save_for_later",
     title: "Save something to learn later",
-    description: "Save a topic, question, link or paper the learner wants to learn properly later (\"save this to koro\", \"I want to learn X later\"). Give a clear title, the URL if there is one, a one-line note on why it came up, and 1-3 tags. Saving the same link again updates the existing item. Returns the item with its number (#12).",
+    description: "Save a topic, question, link, paper or snippet the learner wants to learn properly later (\"save this to koro\", \"I want to learn X later\"). Give a clear title, the URL if there is one, a note on why it came up (it can be long: a paragraph, an example, code), and 1-3 tags. Optionally put it straight on a notebook page; otherwise it waits in the inbox. Saving the same link again updates the existing item. Returns the item with its number (#12) and page.",
     inputSchema: {
       type: "object",
       properties: {
         what: { type: "string", description: "The topic, question or URL to save." },
         title: { type: "string", description: "Short title. For a link, the page or paper title." },
-        note: { type: "string", description: "Why it caught their eye, what they were doing." },
+        note: { type: "string", description: "Why it caught their eye, what they were doing; any detail, example or snippet (markdown)." },
         tags: TAGS,
-        kind: { type: "string", enum: ["topic", "question", "note", "url", "pdf"], description: "Usually inferred." },
+        kind: { type: "string", enum: ["topic", "question", "note", "url", "pdf", "snippet"], description: "Usually inferred." },
+        page: { ...PAGE, description: PAGE.description + " Omit for the inbox." },
       },
       required: ["what"],
       additionalProperties: false,
     },
+    annotations: { destructiveHint: false },
     run: (ctx, a) => {
       const what = String(a.what).trim();
       const isUrl = URL_RE.test(what);
       const kind = a.kind ?? (isUrl ? (/\.pdf([?#]|$)/i.test(what) ? "pdf" : "url") : undefined);
       // A titled topic keeps its full wording in the note.
       const extra = !isUrl && a.title && a.title.trim() !== what ? what : undefined;
-      return ctx.rpc("koro_save_item", {
+      return ctx.rpc("koro_capture", {
         p_learner: ctx.learner, p_title: a.title ?? (isUrl ? undefined : what), p_kind: kind,
         p_body: [extra, a.note].filter(Boolean).join("\n\n") || undefined, p_url: isUrl ? what : undefined,
-        p_tags: a.tags ?? [], p_context: {}, p_client: CLIENT,
+        p_tags: a.tags ?? [], p_context: {}, p_client: CLIENT, p_page: a.page,
       });
     },
   },
@@ -484,7 +494,7 @@ export const TOOLS: Tool[] = [
         return {
           no: s.no, title: s.title, kind: s.kind, status: s.status, tags: s.tags ?? [], note: s.body ?? null,
           url: s.url ?? null, file: s.file?.filename ?? null, file_link, saved: s.created_at,
-          from: s.context?.client ?? null,
+          from: s.context?.client ?? null, page: brief(s.page) ?? "inbox",
         };
       }));
       return { items, counts: r?.counts ?? {}, tags: r?.tags ?? [] };
@@ -493,24 +503,208 @@ export const TOOLS: Tool[] = [
   {
     name: "update_saved",
     title: "Update a saved item",
-    description: "Move a saved item along (planned, learning, done, archived, or back to inbox), retitle it, add a note, or change its tags.",
+    description: "Move a saved item along (planned, learning, done, archived, or back to inbox), retitle it, add to its note, rewrite its note, or change its tags. To put it on a notebook page use file_items.",
     inputSchema: {
       type: "object",
       properties: {
         item: { type: "integer", minimum: 1, description: "The item number, e.g. 12 for #12." },
         status: { type: "string", enum: SAVED_STATUS },
         title: { type: "string" },
-        note: { type: "string", description: "Appended to the item's notes." },
+        note: { type: "string", description: "Appended to the item's note." },
+        replace_note: { type: "string", description: "Replaces the item's whole note (use note to add instead). Only when the learner asked for a rewrite." },
         add_tags: TAGS,
         remove_tags: { type: "array", items: { type: "string" } },
       },
       required: ["item"],
       additionalProperties: false,
     },
-    run: (ctx, a) => ctx.rpc("koro_update_saved_item", {
-      p_learner: ctx.learner, p_ref: String(a.item), p_status: a.status, p_title: a.title, p_note: a.note,
+    annotations: { destructiveHint: false },
+    run: async (ctx, a) => {
+      const ref = String(a.item);
+      let r: unknown = null;
+      if (typeof a.replace_note === "string") {
+        r = await ctx.rpc("koro_set_saved_text", { p_learner: ctx.learner, p_ref: ref, p_title: a.title ?? "", p_body: a.replace_note });
+        if (a.status === undefined && a.note === undefined && !a.add_tags?.length && !a.remove_tags?.length) return r;
+      }
+      return ctx.rpc("koro_update_saved_item", {
+        p_learner: ctx.learner, p_ref: ref, p_status: a.status, p_title: a.title, p_note: a.note,
+        p_add_tags: a.add_tags, p_remove_tags: a.remove_tags,
+      });
+    },
+  },
+  // ------------------------------------------------------------------ notebook
+  {
+    name: "notebook_toc",
+    title: "Notebook contents",
+    description: "The learner's notebook outline: every page numbered in reading order (1, 1.1, 1.1.2) with depth, status, tags, item count and whether it has a write-up, plus how many items wait in the inbox. Read it before saving onto a page, filing or writing, so things go in the right place. Optionally one branch (page) or the inbox, with each page's items listed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        page: { ...PAGE, description: "Only this page and everything under it, or \"inbox\". Default: the whole notebook." },
+        items: { type: "boolean", description: "List each page's items (number, kind, title). Default false." },
+        include_archived: { type: "boolean", description: "Show archived pages and items too. Default false." },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    run: async (ctx, a) => {
+      const r = await ctx.rpc("koro_notebook", {
+        p_learner: ctx.learner, p_ref: a.page, p_items: a.items ?? false, p_all: a.include_archived ?? false,
+      });
+      if (!a.page && !(r?.pages ?? []).length) {
+        return { ...r, note: "The notebook has no pages yet. Propose a first page (create_page) when the learner wants to organize what they saved." };
+      }
+      return r;
+    },
+  },
+  {
+    name: "read_page",
+    title: "Read a notebook page",
+    description: "One notebook page: its write-up (markdown body), version, the headings inside it, its path, sub-pages and items. Or just one section of the write-up (section = a heading), or the page's earlier versions (history). Note the version: pass it as if_version to write_page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        page: PAGE,
+        section: { type: "string", description: "A heading in the write-up (or a unique part of it): returns only that section's text." },
+        full: { type: "boolean", description: "Include each item in full (notes, snippets, links). Default false: titles only." },
+        history: { type: "boolean", description: "List earlier versions of the write-up instead (for write_page op restore)." },
+      },
+      required: ["page"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    run: (ctx, a) => {
+      if (a.history) return ctx.rpc("koro_page_history", { p_learner: ctx.learner, p_ref: a.page });
+      if (a.section) return ctx.rpc("koro_page_section", { p_learner: ctx.learner, p_ref: a.page, p_section: a.section });
+      return ctx.rpc("koro_page", { p_learner: ctx.learner, p_ref: a.page, p_full: a.full ?? false });
+    },
+  },
+  {
+    name: "write_page",
+    title: "Edit a page's write-up",
+    description: "Change a notebook page's markdown write-up without resending all of it. op: append = add text at the end, or at the end of a section when section is given; replace_section = replace what is under heading section (the heading stays); replace_text = replace find (must occur exactly once) with text; replace = the whole write-up, only when the learner asked for a rewrite; restore = bring back an earlier version (version from read_page history). Pass if_version (the version you read): the edit is refused if the page changed since; then read it again and redo the edit. Every change is kept.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        page: PAGE,
+        op: { type: "string", enum: WRITE_OPS },
+        text: { type: "string", description: "The markdown to add or put in place (append, replace_section, replace_text, replace)." },
+        section: { type: "string", description: "A heading in the write-up: where append adds, or what replace_section replaces." },
+        find: { type: "string", description: "replace_text: the exact text to replace; include enough of it to be unique." },
+        if_version: { type: "integer", minimum: 1, description: "The page version you read. Strongly recommended." },
+        version: { type: "integer", minimum: 1, description: "restore: the version to bring back." },
+      },
+      required: ["page", "op"],
+      additionalProperties: false,
+    },
+    annotations: { destructiveHint: false },
+    run: async (ctx, a) => {
+      if (a.op === "restore") {
+        if (!a.version) throw new ToolError("restore needs version (see read_page with history: true)");
+        if (a.if_version) {
+          const now = await ctx.rpc("koro_page", { p_learner: ctx.learner, p_ref: a.page, p_full: false });
+          if (now?.version !== a.if_version) {
+            throw new ToolError(`page "${now?.title}" changed since you read it (you had version ${a.if_version}, it is now ${now?.version}): read it again first`);
+          }
+        }
+        return ctx.rpc("koro_page_restore", { p_learner: ctx.learner, p_ref: a.page, p_version: a.version, p_client: CLIENT });
+      }
+      if (typeof a.text !== "string") throw new ToolError(`${a.op} needs text`);
+      if (a.op === "replace_section" && !a.section) throw new ToolError("replace_section needs section (a heading in the page)");
+      if (a.op === "replace_text" && !a.find) throw new ToolError("replace_text needs find (the exact text to replace)");
+      return ctx.rpc("koro_page_write", {
+        p_learner: ctx.learner, p_ref: a.page, p_op: a.op, p_text: a.text,
+        p_section: a.op === "append" || a.op === "replace_section" ? a.section : undefined,
+        p_find: a.op === "replace_text" ? a.find : undefined, p_if_version: a.if_version, p_client: CLIENT,
+      });
+    },
+  },
+  {
+    name: "create_page",
+    title: "Create a notebook page",
+    description: "Make a notebook page: at the top level, under a parent page (placed last, so existing numbers don't change), or right after a sibling (after). Optionally with a first write-up and tags. A page with the same title under the same parent is returned instead of duplicated (existed: true). Check notebook_toc first and, unless the learner said where, propose the place before creating.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "The page title, e.g. \"Signals\"." },
+        parent: { ...PAGE, description: "The page to put it under. Omit for the top level (or when after is given)." },
+        after: { ...PAGE, description: "Put it right after this sibling page instead of last." },
+        text: { type: "string", description: "A first write-up (markdown)." },
+        tags: TAGS,
+      },
+      required: ["title"],
+      additionalProperties: false,
+    },
+    annotations: { destructiveHint: false },
+    run: (ctx, a) => ctx.rpc("koro_page_create", {
+      p_learner: ctx.learner, p_title: a.title, p_parent: a.parent, p_after: a.after, p_body: a.text,
+      p_tags: a.tags ?? [], p_client: CLIENT,
+    }),
+  },
+  {
+    name: "update_page",
+    title: "Rename or set a page's status",
+    description: "Rename a notebook page, set its status (inbox, planned, learning, done; archived hides it), or change its tags. Pages are never deleted: archive them. To edit the write-up use write_page; to move it use move_page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        page: PAGE,
+        title: { type: "string", description: "New title." },
+        status: { type: "string", enum: SAVED_STATUS },
+        add_tags: TAGS,
+        remove_tags: { type: "array", items: { type: "string" } },
+      },
+      required: ["page"],
+      additionalProperties: false,
+    },
+    annotations: { destructiveHint: false },
+    run: (ctx, a) => ctx.rpc("koro_page_update", {
+      p_learner: ctx.learner, p_ref: a.page, p_title: a.title, p_status: a.status,
       p_add_tags: a.add_tags, p_remove_tags: a.remove_tags,
     }),
+  },
+  {
+    name: "move_page",
+    title: "Move a notebook page",
+    description: "Move a page and everything under it: under another page (placed last), right after a sibling page, or to the top level. Give exactly one of parent, after or top. Pages renumber; the result has the new number.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        page: PAGE,
+        parent: { ...PAGE, description: "The page to move it under." },
+        after: { ...PAGE, description: "The sibling to put it right after." },
+        top: { type: "boolean", description: "true: move it to the top level." },
+      },
+      required: ["page"],
+      additionalProperties: false,
+    },
+    annotations: { destructiveHint: false },
+    run: (ctx, a) => {
+      const where = [a.parent, a.after, a.top ? true : undefined].filter((x) => x !== undefined && x !== null && x !== "");
+      if (where.length !== 1) throw new ToolError("give exactly one of parent, after or top: true");
+      return ctx.rpc("koro_page_move", {
+        p_learner: ctx.learner, p_ref: a.page, p_parent: a.parent, p_after: a.after, p_top: a.top === true,
+      });
+    },
+  },
+  {
+    name: "file_items",
+    title: "File saved items on a page",
+    description: "Put saved items on a notebook page (by number: [3, 4] for #3 and #4), or back in the inbox with page \"inbox\". Each item lives on one page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        items: { type: "array", items: { type: "integer" }, description: "Item numbers, e.g. [3, 4]." },
+        page: { ...PAGE, description: PAGE.description + " Or \"inbox\"." },
+      },
+      required: ["items", "page"],
+      additionalProperties: false,
+    },
+    annotations: { destructiveHint: false },
+    run: (ctx, a) => {
+      if (!a.items.length) throw new ToolError("items is empty: give the item numbers to file");
+      return ctx.rpc("koro_file_items", { p_learner: ctx.learner, p_items: a.items.map(String), p_page: a.page });
+    },
   },
 ];
 
@@ -533,6 +727,7 @@ export function validateArgs(schema: Schema, args: Record<string, any>): string 
     if (spec.type === "array") {
       if (!Array.isArray(value)) return `${key} must be a list`;
       if (spec.items?.type === "string" && value.some((v: unknown) => typeof v !== "string")) return `${key} must be a list of strings`;
+      if (spec.items?.type === "integer" && value.some((v: unknown) => !Number.isInteger(v))) return `${key} must be a list of whole numbers`;
     }
     if (spec.enum && !spec.enum.includes(value)) return `${key} must be one of: ${spec.enum.join(", ")}`;
     if (typeof spec.minimum === "number" && value < spec.minimum) return `${key} must be at least ${spec.minimum}`;
@@ -575,6 +770,15 @@ export const PROMPTS: Prompt[] = [
     title: "What did I save?",
     description: "Things you saved to learn later, grouped by theme.",
     text: () => "What have I saved in koro to learn later? Call list_saved and summarize it by theme: what's there, what's been waiting longest, and which two or three you'd suggest next and why.",
+  },
+  {
+    name: "notebook",
+    title: "My notebook",
+    description: "The notebook's outline, and where to file what's in the inbox.",
+    arguments: [{ name: "page", description: "Optional page to open (number or name)" }],
+    text: (a) => a.page
+      ? `Open page ${a.page} of my koro notebook with read_page and give me a short tour: what the write-up covers, its sub-pages and items.`
+      : "Show my koro notebook: call notebook_toc with items, give me the outline briefly, and if anything waits in the inbox suggest which page each item belongs on (or a new page and where). File them with file_items once I agree.",
   },
   {
     name: "progress",
@@ -713,6 +917,7 @@ async function status(deps: Deps, auth: Auth, handler: (r: Request) => Promise<R
     const list = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const next = await post({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "next_concept", arguments: {} } });
     const toc = await post({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "table_of_contents", arguments: { depth: 0 } } });
+    const book = await post({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "notebook_toc", arguments: {} } });
     const text = (r: any) => r.body?.result?.content?.[0]?.text ?? JSON.stringify(r.body?.error ?? r.body);
     out.selftest = {
       initialize: { status: init.status, protocolVersion: init.body?.result?.protocolVersion, has_instructions: !!init.body?.result?.instructions },
@@ -720,6 +925,7 @@ async function status(deps: Deps, auth: Auth, handler: (r: Request) => Promise<R
       tools: list.body?.result?.tools?.length ?? 0,
       next_concept: { isError: !!next.body?.result?.isError, text: text(next).slice(0, 400) },
       table_of_contents: { isError: !!toc.body?.result?.isError, text: text(toc).slice(0, 400) },
+      notebook_toc: { isError: !!book.body?.result?.isError, text: text(book).slice(0, 400) },
     };
     const label = url.searchParams.get("figure");
     if (label) {

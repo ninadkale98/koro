@@ -656,6 +656,55 @@ def _where_am_i(ctx: Ctx, here: bool) -> dict:
     return out
 
 
+SCISSORS = "# ------------------------ >8 ------------------------"
+
+
+def open_in_editor(text: str, help_lines: list) -> Optional[str]:
+    """Let the person edit text in $VISUAL/$EDITOR (like `git commit`). None if they emptied it.
+
+    Everything below the scissors line is ignored, so code with # lines is safe to write."""
+    import shlex
+    import shutil
+    import subprocess
+    import tempfile
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or (
+        "notepad" if os.name == "nt" else ("nano" if shutil.which("nano") else "vi"))
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
+        fh.write((text or "").rstrip("\n") + "\n\n" + SCISSORS + "\n"
+                 + "".join(f"# {line}\n" for line in help_lines + ["Everything from the line above down is ignored."]))
+        path = fh.name
+    try:
+        try:
+            subprocess.run(shlex.split(editor, posix=os.name != "nt") + [path], check=False)
+        except OSError as exc:
+            raise KoroError(f"couldn't start your editor ({editor}): {exc}. Set $EDITOR, or pass the text instead") from None
+        result = Path(path).read_text(encoding="utf-8")
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    result = result.split(SCISSORS, 1)[0].strip("\n")
+    return result if result.strip() else None
+
+
+def _title_and_body(text: str) -> tuple:
+    lines = text.split("\n")
+    title = lines[0].strip()
+    return title, "\n".join(lines[1:]).strip("\n")
+
+
+def _read_value(value: Optional[str]) -> Optional[str]:
+    """`-` means read the text from stdin (for long text and code)."""
+    if value == "-":
+        text = sys.stdin.read()
+        if not text.strip():
+            raise KoroError("nothing on stdin")
+        return text
+    return value
+
+
 def cmd_save(ctx: Ctx) -> None:
     import hashlib
     import mimetypes
@@ -663,6 +712,11 @@ def cmd_save(ctx: Ctx) -> None:
     a = ctx.args
     what = " ".join(a.what).strip()
     title, body, url, path, kind = a.title, a.note, None, None, a.kind
+    if body == "-" and what != "-":
+        body = _read_value(body)
+    if not what and not a.edit:
+        raise KoroError("what should I save? e.g. koro save \"paged attention\" --note \"saw it in vLLM\" "
+                        "(or koro save --edit to write it in your editor)")
     if what == "-":
         snippet = sys.stdin.read()
         if not snippet.strip():
@@ -686,11 +740,23 @@ def cmd_save(ctx: Ctx) -> None:
             title, body = what[:80].rstrip() + "…", f"{what}\n\n{body}" if body else what
             kind = kind or "note"
         title = title or what
-    else:
-        raise KoroError("what should I save? e.g. koro save \"paged attention\" --note \"saw it in vLLM\"")
 
-    r = ctx.rpc("koro_save_item", learner=ctx.learner, title=title, kind=kind, body=body, url=url,
-                tags=_tags(a.tag), context=_where_am_i(ctx, a.here), client=ctx.cfg.client)
+    if a.edit:  # write the title and a note of any length in your editor
+        text = open_in_editor(f"{title or ''}\n\n{body or ''}", [
+            "First line: the title. Below it: your note, as long as you like (paragraphs, examples, code).",
+            "Save and close the editor to keep it; delete everything to cancel."])
+        if text is None:
+            emit(ctx, {"saved": False}, lambda r: "Nothing saved.")
+            return
+        title, body = _title_and_body(text)
+        title = title or url or (Path(path).name if path else "")
+        if not title:
+            raise KoroError("the first line (the title) is empty")
+        if not kind and "\n" in body.strip():
+            kind = "note"
+
+    r = ctx.rpc("koro_capture", learner=ctx.learner, title=title, kind=kind, body=body, url=url,
+                tags=_tags(a.tag), context=_where_am_i(ctx, a.here), client=ctx.cfg.client, page=a.page)
     if path:
         data = Path(path).read_bytes()
         name = re.sub(r"[^\w.\-]+", "-", Path(path).name).strip("-") or "file"
@@ -747,10 +813,24 @@ def cmd_saved(ctx: Ctx) -> None:
             if note:
                 item["note"] = note
             results.append(item)
+        elif action == "edit" and a.edit:  # rewrite the title and note in your editor
+            item = ctx.rpc("koro_saved_item", learner=ctx.learner, ref=ref)
+            text = open_in_editor(f"{item['title']}\n\n{item.get('body') or ''}", [
+                f"Editing item #{item['no']}. First line: the title. Below it: the note.",
+                "Save and close to keep your changes; delete everything to leave the item as it was."])
+            if text is None or text == f"{item['title']}\n\n{item.get('body') or ''}".strip("\n"):
+                item["note"] = "unchanged"
+                results.append(item)
+                continue
+            new_title, new_body = _title_and_body(text)
+            results.append(ctx.rpc("koro_set_saved_text", learner=ctx.learner, ref=ref, title=new_title, body=new_body))
+            if a.tag or a.untag:
+                results[-1] = ctx.rpc("koro_update_saved_item", learner=ctx.learner, ref=ref,
+                                      add_tags=_tags(a.tag) or None, remove_tags=_tags(a.untag) or None)
         elif action in SAVED_STATUSES or action in ("edit", "reopen"):
             status = "inbox" if action == "reopen" else (action if action in SAVED_STATUSES else None)
             results.append(ctx.rpc("koro_update_saved_item", learner=ctx.learner, ref=ref, status=status,
-                                   title=a.title, note=a.note, add_tags=_tags(a.tag) or None,
+                                   title=a.title, note=_read_value(a.note), add_tags=_tags(a.tag) or None,
                                    remove_tags=_tags(a.untag) or None))
         else:
             raise KoroError(f"unknown action {action!r}: use show, open, edit, planned, learning, done, "
@@ -759,14 +839,263 @@ def cmd_saved(ctx: Ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The notebook: pages (nested, numbered like a book) holding your write-ups and saved items
+# ---------------------------------------------------------------------------
+def cmd_notebook(ctx: Ctx) -> None:
+    a = ctx.args
+    r = ctx.rpc("koro_notebook", learner=ctx.learner, ref=a.ref, items=a.items or None, all=a.all or None)
+    emit(ctx, r, render.notebook)
+
+
+def _page_edit_help(page: dict, section: Optional[str] = None) -> list:
+    where = f"section \"{section}\" of " if section else ""
+    return [f"Editing {where}page {page.get('number')} {page.get('title')} (version {page.get('version')}).",
+            "Write freely: paragraphs, lists, examples, code blocks. Headings (## Name) become sections you can",
+            "target later with --section / --under. Save and close to keep it; delete everything to cancel."]
+
+
+def cmd_page(ctx: Ctx) -> None:
+    a = ctx.args
+    words = list(a.args)
+    if not words:
+        raise KoroError("which page? e.g. koro page 1.2, koro page new \"Signals\" -p 1, or see koro notebook")
+    head = words[0]
+
+    if head == "new":
+        title = " ".join(words[1:]).strip() or a.title
+        if not title:
+            raise KoroError('koro page new "<title>" [-p <parent>] [--after <page>]')
+        body = _read_value(a.write)
+        r = ctx.rpc("koro_page_create", learner=ctx.learner, title=title, parent=a.parent, after=a.after,
+                    body=body, tags=_tags(a.tag), client=ctx.cfg.client)
+        if a.edit and not r.get("existed"):
+            text = open_in_editor("", _page_edit_help(r))
+            if text is not None:
+                r = {**ctx.rpc("koro_page_write", learner=ctx.learner, ref=r["id"], op="replace", text=text,
+                               if_version=r["version"], client=ctx.cfg.client), "existed": False}
+        emit(ctx, r, render.page_created)
+        return
+
+    if head == "move":
+        if len(words) < 2:
+            raise KoroError("koro page move <page> (-p <new parent> | --after <page> | --top)")
+        r = ctx.rpc("koro_page_move", learner=ctx.learner, ref=words[1], parent=a.parent, after=a.after,
+                    top=a.top or None)
+        emit(ctx, r, lambda x: f"Moved: now {x['number']} {x['title']}. See `koro notebook` for the new numbers.")
+        return
+
+    ref = " ".join(words)
+    client = ctx.cfg.client
+    if a.history:
+        emit(ctx, ctx.rpc("koro_page_history", learner=ctx.learner, ref=ref), render.page_history)
+        return
+    if a.restore is not None:
+        r = ctx.rpc("koro_page_restore", learner=ctx.learner, ref=ref, version=a.restore, client=client)
+        emit(ctx, r, lambda x: f"Restored version {a.restore} of {x['number']} {x['title']} (now version {x['version']}).")
+        return
+
+    results = []
+    if a.rename or a.status or a.tag or a.untag:
+        results.append(ctx.rpc("koro_page_update", learner=ctx.learner, ref=ref, title=a.rename, status=a.status,
+                               add_tags=_tags(a.tag) or None, remove_tags=_tags(a.untag) or None))
+    write = None
+    if a.edit:
+        if a.section:
+            cur = ctx.rpc("koro_page_section", learner=ctx.learner, ref=ref, section=a.section)
+            text = open_in_editor(cur.get("text") or "", _page_edit_help(cur["page"], cur["heading"]))
+            if text is not None and text.strip() != (cur.get("text") or "").strip():
+                write = dict(op="replace_section", text=text, section=cur["heading"], if_version=cur["version"])
+        else:
+            cur = ctx.rpc("koro_page", learner=ctx.learner, ref=ref)
+            text = open_in_editor(cur.get("body") or "", _page_edit_help(cur))
+            if text is not None and text.strip() != (cur.get("body") or "").strip():
+                write = dict(op="replace", text=text, if_version=cur["version"])
+            elif text is None and (cur.get("body") or "").strip():
+                raise KoroError("you emptied the editor, so nothing changed. To clear the write-up on purpose: "
+                                f"koro page {ref} --write \"\"")
+    elif a.append is not None:
+        write = dict(op="append", text=_read_value(a.append), section=a.under, if_version=a.if_version)
+    elif a.replace is not None:
+        if a.with_ is None:
+            raise KoroError('--replace needs --with: koro page 1.2 --replace "old words" --with "new words"')
+        write = dict(op="replace_text", find=_read_value(a.replace), text=_read_value(a.with_), if_version=a.if_version)
+    elif a.section and a.with_ is not None:
+        write = dict(op="replace_section", section=a.section, text=_read_value(a.with_), if_version=a.if_version)
+    elif a.write is not None:
+        write = dict(op="replace", text=_read_value(a.write), if_version=a.if_version)
+    elif a.section:
+        emit(ctx, ctx.rpc("koro_page_section", learner=ctx.learner, ref=ref, section=a.section), render.page_section)
+        return
+
+    if write:
+        results.append(ctx.rpc("koro_page_write", learner=ctx.learner, ref=ref, client=client, **write))
+    if results:
+        emit(ctx, results[-1], render.page_written)
+        return
+    if a.edit:
+        emit(ctx, {"changed": False}, lambda r: "No changes.")
+        return
+    r = ctx.rpc("koro_page", learner=ctx.learner, ref=ref, full=a.full or None)
+    if a.raw and not ctx.args.json:
+        print(r.get("body") or "")
+        return
+    emit(ctx, r, render.page)
+
+
+def cmd_file(ctx: Ctx) -> None:
+    words = list(ctx.args.args)
+    if len(words) < 2:
+        raise KoroError("koro file <item numbers...> <page or inbox>, e.g. koro file 3 4 1.1.2")
+    *items, page = words
+    r = ctx.rpc("koro_file_items", learner=ctx.learner, items=items, page=page)
+    emit(ctx, r, render.filed)
+
+
+# ---------------------------------------------------------------------------
+# The guide: everything an agent (or a person) needs, from the CLI itself
+# ---------------------------------------------------------------------------
+def guide_sections() -> tuple:
+    """(intro, [(topic, title, text)]) from data/guide.md, split on '## ' headings."""
+    text = (DATA / "guide.md").read_text(encoding="utf-8")
+    parts = re.split(r"(?m)^## ", text)
+    intro, sections = parts[0].strip(), []
+    for part in parts[1:]:
+        head, _, body = part.partition("\n")
+        sections.append((head.strip().lower(), head.strip(), body.strip()))
+    return intro, sections
+
+
+def command_catalog(parser: Optional[argparse.ArgumentParser] = None) -> list:
+    """Every command and option, read from the parser, so it can never drift from the CLI."""
+    parser = parser or build_parser()
+
+    def describe(sp: argparse.ArgumentParser, name: str, help_: str) -> dict:
+        args, subs = [], []
+        for act in sp._actions:
+            if isinstance(act, argparse._HelpAction) or act.dest in ("json", "entity"):
+                continue
+            if isinstance(act, argparse._SubParsersAction):
+                helps = {c.dest: c.help for c in act._choices_actions}
+                subs += [describe(child, f"{name} {sub}", helps.get(sub, "")) for sub, child in act.choices.items()]
+                continue
+            args.append({k: v for k, v in {
+                "flags": act.option_strings or None, "name": None if act.option_strings else act.dest,
+                "help": act.help, "choices": list(act.choices) if act.choices else None,
+                "required": act.required or None, "repeatable": isinstance(act, argparse._AppendAction) or None,
+                "takes_value": None if act.nargs == 0 else True,
+            }.items() if v is not None})
+        out = {"command": f"koro {name}", "help": help_, "args": args}
+        if sp.description and sp.description != help_:
+            out["description"] = sp.description
+        if sp.epilog:
+            out["examples"] = [l.strip() for l in sp.epilog.splitlines()[1:] if l.strip()]
+        if subs:
+            out["subcommands"] = subs
+        return out
+
+    action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    helps = {c.dest: c.help for c in action._choices_actions}
+    return [describe(sp, name, helps.get(name, "")) for name, sp in action.choices.items()]
+
+
+def _catalog_text(catalog: list) -> str:
+    out = ["## commands", "",
+           "Every command takes --json (machine-readable output) and -e/--entity <book> where a book applies.", ""]
+
+    def walk(c: dict) -> None:
+        out.append(f"{c['command']}  —  {c['help']}")
+        for a in c["args"]:
+            name = ", ".join(a["flags"]) if a.get("flags") else f"<{a['name']}>"
+            extra = f" {{{','.join(map(str, a['choices']))}}}" if a.get("choices") else ""
+            out.append(f"    {name}{extra}{' (repeatable)' if a.get('repeatable') else ''}  {a.get('help') or ''}".rstrip())
+        for ex in c.get("examples") or []:
+            out.append(f"    e.g. {ex}")
+        out.append("")
+        for sub in c.get("subcommands") or []:
+            walk(sub)
+
+    for c in catalog:
+        walk(c)
+    return "\n".join(out).rstrip()
+
+
+def cmd_guide(ctx: Ctx) -> None:
+    a = ctx.args
+    intro, sections = guide_sections()
+    topics = [t for t, _, _ in sections]
+    catalog = command_catalog()
+    topic = (a.topic or "").lower().strip()
+
+    def section_text(t: str) -> str:
+        if t == "commands":
+            return _catalog_text(catalog)
+        if t == "payload":
+            return (DATA / "node-payload.md").read_text(encoding="utf-8").strip()
+        title, body = next((ti, b) for tp, ti, b in sections if tp == t)
+        return f"## {title}\n\n{body}"
+
+    if a.list:
+        emit(ctx, {"topics": topics}, lambda r: "Topics: " + ", ".join(r["topics"]) + "\nRead one: koro guide <topic>")
+        return
+    if topic:
+        match = [t for t in topics if t == topic] or sorted((t for t in topics if t.startswith(topic)), key=len)
+        if not match:
+            raise KoroError(f"no guide topic {topic!r}. Topics: {', '.join(topics)}")
+        t = match[0]
+        if ctx.args.json:
+            emit(ctx, {"topic": t, "text": section_text(t), **({"commands": catalog} if t == "commands" else {})})
+        else:
+            print(section_text(t))
+        return
+    full = "\n\n".join([intro] + [section_text(t) for t in topics])
+    if ctx.args.json:
+        emit(ctx, {"version": __version__, "topics": topics, "guide": full, "commands": catalog})
+    else:
+        print(full)
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
+SAVE_EXAMPLES = """examples:
+  koro save "paged attention vs continuous batching" -n "saw it in the vLLM scheduler" -t gpu
+  koro save "why is decode memory-bound?" -p 2.1          # straight onto notebook page 2.1
+  koro save https://arxiv.org/abs/2309.06180 -t papers    # the page title is looked up
+  koro save ~/Downloads/paper.pdf -n "the tiling trick"   # uploaded to your private storage
+  koro save - --title "EINTR retry loop" -p signals < eintr.c   # long text or code from stdin
+  koro save --edit -p signals                             # write title + note in your editor
+"""
+
+NOTEBOOK_EXAMPLES = """examples:
+  koro notebook                 # every page with its number, status and item count, plus the inbox
+  koro notebook 1.1 --items     # one branch, with the items on each page
+  koro notebook inbox --items   # what's waiting to be filed
+"""
+
+PAGE_EXAMPLES = """examples:
+  koro page 1.1                                  # read: write-up, its headings, sub-pages, items
+  koro page signals --full                       # same page by name, every item in full
+  koro page new "Signals" -p 1                   # new page under 1 (goes last: existing numbers keep)
+  koro page new "Real-time signals" -p 1.1 --after 1.1.1
+  koro page move 1.2 -p 1.1                      # make 1.2 a sub-page of 1.1 (or --top, or --after)
+  koro page 1.1 --append "one more paragraph"    # add to the end, nothing else changes
+  koro page 1.1 --append - --under EINTR < ex.c  # add under the "EINTR" heading
+  koro page 1.1 --section EINTR                  # show one section
+  koro page 1.1 --edit --section EINTR           # edit only that section in your editor
+  koro page 1.1 --section EINTR --with "new text"           # replace one section
+  koro page 1.1 --replace "any thread" --with "any one thread"
+  koro page 1.1 --edit                           # whole write-up in your editor
+  koro page 1.1 --rename "Unix signals" --status learning -t fastrpc
+  koro page 1.1 --history ; koro page 1.1 --restore 3
+"""
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", help="machine-readable output")
     common.add_argument("-e", "--entity", help="book/paper/repo: uuid or title (default: most recent)")
 
-    p = argparse.ArgumentParser(prog="koro", description=__doc__.split("\n")[0])
+    p = argparse.ArgumentParser(prog="koro", description=__doc__.split("\n")[0],
+                                epilog="New here, or an agent? `koro guide` prints the whole manual; "
+                                       "`koro guide <topic>` one part (e.g. notebook, teach, save).")
     p.add_argument("--version", action="version", version=f"koro {__version__}")
     sub = p.add_subparsers(dest="command", metavar="command")
 
@@ -775,19 +1104,28 @@ def build_parser() -> argparse.ArgumentParser:
         sp.set_defaults(fn=fn)
         return sp
 
+    sp = add("guide", cmd_guide, "the full manual: concepts, every command, workflows (start here, agents)")
+    sp.add_argument("topic", nargs="?", help="one topic, e.g. notebook, teach, save, commands, payload")
+    sp.add_argument("--list", action="store_true", help="list the topics")
+
     sp = add("init", cmd_init, "connect to your Supabase project and pick the learner")
-    sp.add_argument("--url"); sp.add_argument("--key"); sp.add_argument("--name"); sp.add_argument("--device")
+    sp.add_argument("--url", help="your Supabase project URL, e.g. https://abc.supabase.co")
+    sp.add_argument("--key", help="the project's secret key (omit it to be asked without echo)")
+    sp.add_argument("--name", help="learner name (only needed when the project has several learners, or none)")
+    sp.add_argument("--device", help="a name for this machine (default: its hostname)")
     add("whoami", cmd_whoami, "show configuration")
     sp = add("install-skill", cmd_skill, "install the /koro skill for Claude Code (user level)")
     sp.add_argument("--dir", help="target directory (default ~/.claude/skills/koro)")
 
     add("library", cmd_library, "list your books, papers and repos")
     sp = add("add", cmd_add, "add a PDF: dedupe, outline, ready to ingest")
-    sp.add_argument("path")
-    sp.add_argument("--title"); sp.add_argument("--author"); sp.add_argument("--version", dest="version")
-    sp.add_argument("--type", default="book", choices=["book", "paper"])
+    sp.add_argument("path", help="the PDF on this machine")
+    sp.add_argument("--title", help="title (default: from the PDF)")
+    sp.add_argument("--author", help="author (default: from the PDF)")
+    sp.add_argument("--version", dest="version", help="edition or version, e.g. 2nd ed, v3")
+    sp.add_argument("--type", default="book", choices=["book", "paper"], help="book (default) or paper")
     sp.add_argument("--canonical", help="override canonical id, e.g. isbn:978..., arxiv:2401.12345")
-    sp.add_argument("--rebuild-outline", action="store_true")
+    sp.add_argument("--rebuild-outline", action="store_true", help="rebuild the outline of a book that exists")
     sp.add_argument("--no-assets", action="store_true",
                     help="don't store the PDF, section texts and figures (run `koro ingest assets` later)")
 
@@ -804,16 +1142,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lease", type=int, default=30, help="minutes before an unfinished claim expires")
     s.add_argument("--pdf", help="path to the source PDF on this machine")
     s = iadd("check", cmd_ingest_check, "validate a payload file (add --node for the copy check)")
-    s.add_argument("file"); s.add_argument("--node"); s.add_argument("--pdf")
+    s.add_argument("file", help="the payload JSON file")
+    s.add_argument("--node", help="section key, to check nothing is copied from its text")
+    s.add_argument("--pdf", help="path to the source PDF on this machine")
     s = iadd("save", cmd_ingest_save, "validate and save a payload for a node")
-    s.add_argument("node"); s.add_argument("file"); s.add_argument("--pdf")
+    s.add_argument("node", help="section key, e.g. 2.4.1")
+    s.add_argument("file", help="the payload JSON file")
+    s.add_argument("--pdf", help="path to the source PDF on this machine")
     s.add_argument("--force", action="store_true", help="save even if validation fails")
     s = iadd("release", cmd_ingest_release, "give a claimed node back (or mark it failed)")
-    s.add_argument("node"); s.add_argument("--error")
+    s.add_argument("node", help="section key")
+    s.add_argument("--error", help="why it failed (marks the section failed instead of pending)")
     s = iadd("outline", cmd_ingest_outline, "upload a hand-made outline JSON (repos, papers without bookmarks)")
-    s.add_argument("file")
+    s.add_argument("file", help='JSON list of {"key","title","parent_key","kind","order_index","page_start","page_end"}')
     s = iadd("link", cmd_ingest_link, "add prerequisite links from a JSON file [{from,to,confidence}]")
-    s.add_argument("file")
+    s.add_argument("file", help='JSON list of {"from": "<concept key>", "to": "<earlier key>", "confidence": 0.8}')
     iadd("finalize", cmd_ingest_finalize, "resolve links, break cycles, mark the source ready")
     iadd("status", cmd_ingest_status, "show parsing progress")
     s = iadd("assets", cmd_ingest_assets,
@@ -843,44 +1186,55 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("section", help="section key, e.g. 2.4.1")
     sp.add_argument("--pdf", help="read from this PDF if the text isn't stored")
     sp = add("assess", cmd_assess, "record a judged answer (evidence) for a concept")
-    sp.add_argument("concept")
-    sp.add_argument("--verdict", required=True, choices=["correct", "partial", "wrong"])
+    sp.add_argument("concept", help="concept key, e.g. 2.4.1/arithmetic-intensity-roofline")
+    sp.add_argument("--verdict", required=True, choices=["correct", "partial", "wrong"], help="your honest judgment")
     sp.add_argument("--objective", help="objective key (omit for the whole concept)")
-    sp.add_argument("--question"); sp.add_argument("--answer"); sp.add_argument("--feedback")
-    sp.add_argument("--misconception")
-    sp.add_argument("--kind", default="question", choices=["question", "exercise", "placement"])
-    sp.add_argument("--weight", type=float, default=1.0)
+    sp.add_argument("--question", help="the question you asked")
+    sp.add_argument("--answer", help="the learner's answer, condensed")
+    sp.add_argument("--feedback", help="what was right and what was missing")
+    sp.add_argument("--misconception", help="a specific wrong belief the answer showed, if any")
+    sp.add_argument("--kind", default="question", choices=["question", "exercise", "placement"],
+                    help="question (default), exercise (hands-on), placement (a quick level check)")
+    sp.add_argument("--weight", type=float, default=1.0, help="how much this evidence counts (default 1)")
     sp = add("dispute", cmd_dispute, "correct a verdict you disagree with")
-    sp.add_argument("assessment_id"); sp.add_argument("--verdict", required=True, choices=["correct", "partial", "wrong"])
-    sp.add_argument("--reason", required=True)
+    sp.add_argument("assessment_id", help="from an assess result, or recent_evidence in a lesson")
+    sp.add_argument("--verdict", required=True, choices=["correct", "partial", "wrong"], help="the corrected verdict")
+    sp.add_argument("--reason", required=True, help="why the original verdict was wrong")
     sp = add("known", cmd_known, "mark a section or concept as already known")
-    sp.add_argument("ref", help="section key (e.g. 2.1) or concept key"); sp.add_argument("--note")
+    sp.add_argument("ref", help="section key (e.g. 2.1) or concept key")
+    sp.add_argument("--note", help="how they know it, e.g. 'use it at work'")
     sp = add("toc", cmd_toc, "table of contents with your progress")
-    sp.add_argument("--depth", type=int)
+    sp.add_argument("--depth", type=int, help="0 = chapters, 1 = sections, 2+ = subsections (default: all)")
     sp = add("status", cmd_status, "strengths, gaps, fading concepts and goals")
-    sp.add_argument("--node")
+    sp.add_argument("--node", help="only this section, e.g. 2.4")
     sp = add("search", cmd_search, "find where a topic is covered")
-    sp.add_argument("query")
+    sp.add_argument("query", help="words to look for in section titles, summaries and lessons")
     add("pause", _set_status("paused"), "pause a book")
     add("resume", _set_status("active"), "make a paused/dropped book active again")
     add("done", _set_status("completed"), "mark a book completed")
     add("drop", _set_status("dropped"), "drop a book (history kept)")
     sp = add("restart", cmd_restart, "start a book over (history kept)")
-    sp.add_argument("--yes", action="store_true")
+    sp.add_argument("--yes", action="store_true", help="confirm (progress resets; history is kept)")
     sp = add("goal", cmd_goal, "set a target date and/or daily minutes")
     sp.add_argument("--by", help="YYYY-MM-DD"); sp.add_argument("--daily", type=int, help="minutes per day")
     sp = add("summary", cmd_summary, "save a short narrative of where you stand in a book")
-    sp.add_argument("text")
+    sp.add_argument("text", help="2-3 sentences: strengths, weak spots, where they are in the book")
     sp = add("time", cmd_time, "study time over the last N days")
-    sp.add_argument("--days", type=int, default=7)
+    sp.add_argument("--days", type=int, default=7, help="how many days back (default 7)")
 
-    sp = add("save", cmd_save, "save something to learn later: a topic, question, link, file or snippet")
-    sp.add_argument("what", nargs="+", help='a topic or question ("paged attention"), a URL, a file path, '
+    sp = add("save", cmd_save, "save something to learn later: a topic, question, link, file or snippet",
+             description="Save something to learn later. It goes to your inbox, or straight onto a notebook "
+                         "page with -p. Notes can be as long as you like.",
+             epilog=SAVE_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp.add_argument("what", nargs="*", help='a topic or question ("paged attention"), a URL, a file path, '
                                             "or - to read a snippet from stdin")
-    sp.add_argument("-n", "--note", help="why it caught your eye, where it came up")
+    sp.add_argument("-n", "--note", help="why it caught your eye, where it came up (any length; - reads stdin)")
+    sp.add_argument("-p", "--page", help="notebook page to put it on: number (1.2) or name (default: inbox)")
+    sp.add_argument("--edit", action="store_true", help="write the title and note in your editor")
     sp.add_argument("-t", "--tag", action="append", help="tag (repeat, or comma-separate)")
     sp.add_argument("--title", help="a short title (default: the topic, the page title, or the file name)")
-    sp.add_argument("--kind", choices=["topic", "question", "note", "url", "pdf", "file", "snippet"])
+    sp.add_argument("--kind", choices=["topic", "question", "note", "url", "pdf", "file", "snippet"],
+                    help="usually inferred")
     sp.add_argument("--here", action="store_true", help="also record the current repo, branch and folder")
     sp.add_argument("--no-fetch", action="store_true", help="don't look up a link's page title")
     sp = add("saved", cmd_saved, "things you saved to learn: list, show, open, or change their status")
@@ -892,19 +1246,58 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-t", "--tag", action="append", help="list: filter by tag; edit: add tags")
     sp.add_argument("--untag", action="append", help="edit: remove tags")
     sp.add_argument("--search", help="list: search titles, notes, links and tags")
-    sp.add_argument("-n", "--note", help="edit: append a note")
+    sp.add_argument("-n", "--note", help="edit: append a note (- reads stdin)")
     sp.add_argument("--title", help="edit: new title")
-    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--edit", action="store_true", help="edit: rewrite the title and note in your editor")
+    sp.add_argument("--limit", type=int, default=50, help="list: at most this many (default 50)")
+
+    sp = add("notebook", cmd_notebook, "your notebook's table of contents: pages, numbers, item counts, inbox",
+             epilog=NOTEBOOK_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp.add_argument("ref", nargs="?", help="only this page and what's under it (number or name), or inbox")
+    sp.add_argument("--items", action="store_true", help="list the items on each page too")
+    sp.add_argument("--all", action="store_true", help="include archived pages and items")
+
+    sp = add("page", cmd_page, "read, create, move or edit a notebook page",
+             description="Read a page, or change just the part you name. Pages are addressed by number from "
+                         "`koro notebook` (1.2), by name, or by path (linux/signals).",
+             epilog=PAGE_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp.add_argument("args", nargs="*", help="<page> | new <title> | move <page>")
+    g = sp.add_argument_group("reading")
+    g.add_argument("--full", action="store_true", help="include every item in full")
+    g.add_argument("--raw", action="store_true", help="print only the write-up (markdown)")
+    g.add_argument("--section", help="a heading in the write-up: show it, edit it (--edit), or replace it (--with)")
+    g = sp.add_argument_group("writing (only the part you name changes; every change is kept)")
+    g.add_argument("--edit", action="store_true", help="edit the write-up (or --section) in your editor")
+    g.add_argument("--append", help="add text at the end (or under --under); - reads stdin")
+    g.add_argument("--under", help="with --append: the heading to add under")
+    g.add_argument("--replace", help='exact text to replace (with --with), e.g. --replace "old" --with "new"')
+    g.add_argument("--with", dest="with_", metavar="TEXT", help="the new text for --replace or --section; - reads stdin")
+    g.add_argument("--write", help="replace the whole write-up (- reads stdin); with `new`, the first write-up")
+    g.add_argument("--if-version", type=int, help="refuse the edit if the page changed since this version")
+    g.add_argument("--history", action="store_true", help="earlier versions of the write-up")
+    g.add_argument("--restore", type=int, metavar="VERSION", help="bring back an earlier version")
+    g = sp.add_argument_group("organizing")
+    g.add_argument("-p", "--parent", help="new/move: the page to put it under")
+    g.add_argument("--after", help="new/move: place it right after this sibling page")
+    g.add_argument("--top", action="store_true", help="move: to the top level")
+    g.add_argument("--title", help="new: the title (instead of words after `new`)")
+    g.add_argument("--rename", help="new title for the page")
+    g.add_argument("--status", choices=list(SAVED_STATUSES), help="inbox, planned, learning, done or archived")
+    g.add_argument("-t", "--tag", action="append", help="add tags")
+    g.add_argument("--untag", action="append", help="remove tags")
+
+    sp = add("file", cmd_file, "move saved items onto a notebook page (or back to the inbox)")
+    sp.add_argument("args", nargs="+", help="<item numbers...> <page or inbox>, e.g. 3 4 1.1.2")
 
     con = add("connector", None, "manage the Claude connector URL (learn through claude.ai)")
     csub = con.add_subparsers(dest="connector_command", metavar="action")
     s = csub.add_parser("new", help="create a connector URL", parents=[common])
-    s.add_argument("--label", default="claude.ai")
+    s.add_argument("--label", default="claude.ai", help="a name for this URL, e.g. phone, work laptop")
     s.set_defaults(fn=cmd_connector_new)
     s = csub.add_parser("list", help="list connector URLs (tokens are never shown again)", parents=[common])
     s.set_defaults(fn=cmd_connector_list)
     s = csub.add_parser("revoke", help="revoke a connector URL", parents=[common])
-    s.add_argument("token_id")
+    s.add_argument("token_id", help="from koro connector list")
     s.set_defaults(fn=cmd_connector_revoke)
     return p
 

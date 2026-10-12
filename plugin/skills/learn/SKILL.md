@@ -1,7 +1,7 @@
 ---
 name: learn
-description: Teach the user a book, paper or repo with koro, their headless teacher agent. Use when the user says /koro, wants to learn/study/continue/resume a book, asks what they were reading, wants a lesson, quiz or progress report, wants to add or parse a new source for learning, or wants to save something to learn later ("save this to koro", "remind me to learn X") or see what they saved.
-argument-hint: "[continue | start <book> [section] | status | toc | search <topic> | save <thing> | saved | add <file.pdf> | ingest]"
+description: Teach the user a book, paper or repo with koro, their headless teacher agent, and manage their learning notebook. Use when the user says /koro, wants to learn/study/continue/resume a book, asks what they were reading, wants a lesson, quiz or progress report, wants to add or parse a new source, wants to save something to learn later ("save this to koro", "remind me to learn X"), or wants to see, organize or edit their notebook pages and saved things.
+argument-hint: "[continue | start <book> [section] | status | toc | search <topic> | save <thing> | saved | notebook | page <n> | add <file.pdf> | ingest]"
 allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 
@@ -10,6 +10,8 @@ allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 Koro stores what the learner is studying and everything they've shown they know. It never
 calls a model: **you** are the teacher. You read lessons and progress from the `koro` CLI,
 teach, judge answers, and write evidence back. Always pass `--json` and read the JSON.
+`koro guide` prints the complete manual (concepts, every command and option, JSON fields);
+`koro guide <topic>` one part: notebook, teach, save, books, payload, commands, ...
 
 Arguments: $ARGUMENTS
 
@@ -20,6 +22,7 @@ Arguments: $ARGUMENTS
 - `status` → `koro status --json` · `toc` → `koro toc --json` · `search <topic>` → `koro search "<topic>" --json`
 - `save <thing>`, "save this to koro", "I want to learn X later" → see "Saving things to learn later"
 - `saved`, "what did I save?" → `koro saved --json`
+- `notebook`, "show my notebook" → `koro notebook --json` · `page <n>` → `koro page <n> --json` (see "The notebook")
 - `add <file>` → see "Adding a source" · `ingest` → see "Parsing a source"
 - anything else ("teach me attention", "quiz me on chapter 3"): find it with `koro search`, then teach it.
 
@@ -87,6 +90,8 @@ If `koro` is missing, install it: `pip install koro-learn` (the command is `koro
 | "How much did I study?" | `koro time --days 7 --json` |
 | "Save this / I want to learn X later" | `koro save "<X>" --note "<why>" --tag <t> --json` (see below) |
 | "What did I save?" / "anything saved about GPUs?" | `koro saved --json` (`--tag gpu`, `--search "..."`, `--all`) |
+| "Show my notebook" / "what's in my Signals page?" | `koro notebook --json` / `koro page signals --json` |
+| "Add this under 1.2" / "put it in my sigaction page" | `koro save "..." -p 1.2 --json`, or `koro page 1.2 --append - --json` for their write-up |
 
 Several books: commands default to the most recent one; pass `-e "<title or id>"` otherwise.
 
@@ -98,8 +103,12 @@ and get back to what they were doing:
 
 ```
 koro save "<topic, question, URL or file path>" --title "<short title>" \
-  --note "<one line: why it came up, what they were doing>" --tag <topic> --json
+  --note "<one line: why it came up, what they were doing>" --tag <topic> [-p <page>] --json
 ```
+
+- `-p <page>` puts it straight onto a notebook page (its number from `koro notebook`, or its
+  name); without it the item goes to the inbox. If they named a place, use it; if a page
+  obviously fits, use it and say so; otherwise leave it in the inbox.
 
 - A URL is saved as a link (koro looks up the page title; pass `--title` if you know a better
   one). A file path, such as a PDF, is uploaded to their private storage so it's there on every
@@ -114,6 +123,25 @@ koro save "<topic, question, URL or file path>" --title "<short title>" \
 - "What did I save?": `koro saved --json`, then summarize by theme rather than reading the list
   out. If they ask what to learn next from it, suggest an order with a reason for each and mark
   the ones they pick `planned`. (Building a full curriculum from saved items comes later.)
+
+## The notebook
+
+Saved things live in a notebook of pages that nest like a book (`1`, `1.1`, `1.1.2`). A page
+has a markdown write-up (its `## headings` are sections) and holds saved items; items with no
+page are in the inbox. Full reference: `koro guide notebook`.
+
+- See it: `koro notebook --json` (the TOC), `koro notebook 1.1 --items --json`,
+  `koro page 1.1 --json` (write-up `body`, `version`, `headings`, `subpages`, `item_list`).
+- Organize: `koro page new "<title>" -p <parent> [--after <sibling>]`, `koro page move <n> -p <parent>`,
+  `koro file <item numbers...> <page|inbox>`, `koro page <n> --rename ... --status learning`.
+- Write only the part you mean, passing `--if-version <version from your read>`:
+  `--append "<text>"` (end of the write-up), `--append - --under "<heading>"` (end of a section,
+  text on stdin), `--section "<heading>" --with -` (replace a section), `--replace "<exact old>"
+  --with "<new>"`, `--write -` (everything; only when asked). Every change is kept:
+  `--history`, `--restore <n>`. On a version conflict, re-read and redo; never overwrite.
+- Before adding to the notebook, look at the TOC and choose the fitting page; if a new page is
+  needed, say where you'll put it (number and parent) unless they already told you.
+- `--edit` opens an editor for the learner; never use it yourself.
 
 ## Adding a source
 
@@ -154,5 +182,6 @@ for the koro project is connected, call the same functions with SQL, e.g.
 Function names and parameters match the CLI (`koro_next_concept`, `koro_status`,
 `koro_toc`, `koro_search`, `koro_mark_known`, `koro_dispute`, `koro_set_summary`,
 `koro_figure`, `koro_figures`, `koro_read_section`, `koro_save_item`, `koro_saved_items`,
-`koro_update_saved_item`, ...). Figure images live in the private
+`koro_update_saved_item`, `koro_capture`, `koro_notebook`, `koro_page`, `koro_page_write`,
+`koro_page_create`, `koro_page_move`, `koro_file_items`, ...). Figure images live in the private
 Storage bucket `koro-private`, so without the CLI describe figures from their captions.

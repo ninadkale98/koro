@@ -75,13 +75,15 @@ Claude then teaches beat by beat, asks the checks, and records every answer, exa
 `/koro:continue`. When a beat has a figure, Claude calls `show_figure`: it sees the book's
 image, walks you through it, and gives you a link to open it (links last an hour). When you
 ask what the book says exactly, it calls `read_section` and answers from the original text.
-Say "save this to koro" in any chat and Claude calls `save_for_later` (see below).
+Say "save this to koro" in any chat and Claude calls `save_for_later` (see below); "put it
+on my signals page" or "add this example under EINTR" works with the notebook tools.
 Tools: `continue_learning`, `start_book`, `next_concept`, `get_lesson`, `show_figure`,
 `read_section`, `record_answer`, `dispute_verdict`, `mark_known`, `table_of_contents`,
 `progress_report`, `search_book`, `list_library`, `set_book_status`, `restart_book`,
 `set_goal`, `save_learner_summary`, `study_time`, `save_for_later`, `list_saved`,
-`update_saved`. Prompts: *Continue learning*, *Study a section*, *Quiz me*, *What did I
-save?*, *How am I doing?*
+`update_saved`, `notebook_toc`, `read_page`, `write_page`, `create_page`, `update_page`,
+`move_page`, `file_items`. Prompts: *Continue learning*, *Study a section*, *Quiz me*,
+*What did I save?*, *My notebook*, *How am I doing?*
 
 Manage URLs with `koro connector list` and `koro connector revoke <id>`. Only a SHA-256 hash
 of each token is stored. Opening the URL in a browser shows a small status page; add
@@ -111,7 +113,45 @@ In Claude Code, say "save this to koro" (or `/koro:save ...`) and the agent writ
 you; "what did I save?" (or `/koro:saved`) gets a summary by theme. In a Claude chat with the
 connector, the same phrases work. Saving the same link twice updates one item.
 
-Coming next: turning saved items into a curriculum and teaching it.
+## Your notebook
+
+Saved things can be organized into a notebook: pages that nest as deep as you like, numbered
+like an outline (1, 1.1, 1.1.2). Each page has its own write-up (markdown, as long as you want:
+notes, examples, code) and holds saved items. Anything not on a page waits in the inbox.
+
+```bash
+koro notebook                          # the whole outline, with item counts and the inbox
+koro page new "Linux internals"        # top-level page 1
+koro page new "Signals" -p 1           # 1.1, under it (new pages go last, so numbers don't shift)
+koro save "EINTR retry loop" -p signals -n - < example.c     # save straight onto a page
+koro file 3 4 1.1                      # move items #3 and #4 onto page 1.1 (or: inbox)
+koro page 1.1                          # read it: write-up, headings, sub-pages, items
+koro page 1.1 --section EINTR          # just one section of the write-up
+koro page 1.1 --append "one more paragraph"          # add without touching the rest
+koro page 1.1 --append - --under EINTR < example.md  # add at the end of one section
+koro page 1.1 --section EINTR --with "new text"      # replace one section
+koro page 1.1 --replace "old words" --with "new"     # fix an exact phrase
+koro page 1.1 --edit                   # or edit it in $EDITOR (add --section to edit one part)
+koro page 1.1 --history                # every earlier version; --restore 3 brings one back
+koro page move 1.2 -p 1.1              # restructure; --after 1.1.1, --top
+koro page 1.1 --status learning        # inbox, planned, learning, done; archived hides it
+```
+
+Pages are addressed by number, by name (or a unique part of it), or by path
+(`linux-internals/signals`). Every change to a write-up is kept, and an agent passes
+`--if-version` so it never writes over an edit you made on another machine. Nothing is
+deleted: archive instead. In Claude Code or a Claude chat, just say what you want ("put this
+under Signals", "add this example to the EINTR part of my signals page", "show my notebook").
+
+Coming next: turning saved items and notebook pages into a curriculum and teaching it.
+
+## The guide (for you and for any agent)
+
+`koro guide` prints the complete manual: concepts, the teaching loop, every command with an
+example, the notebook, JSON output, and the rules agents follow. `koro guide notebook` prints
+one topic, `koro guide --list` the topics, `koro guide --json` everything in one JSON value
+(including a command catalog generated from the CLI itself, so it never goes stale). Point any
+agent at it: "run `koro guide` and use koro". Every command also has `--help` with examples.
 
 ## Daily use
 
@@ -145,6 +185,11 @@ From a plain terminal:
 | `koro ingest assets --pdf <file>` | store the complete source privately (PDF, section texts, figures) |
 | `koro save "<topic, link or file>" -n "why"` | save something to learn later (`-t` tags, `--here` for repo/branch) |
 | `koro saved` / `saved 12` / `saved done 12` | what you saved; show one; move it along |
+| `koro notebook [page] [--items]` | the notebook outline (or one branch), plus the inbox |
+| `koro page <page>` / `page new "<title>" -p <parent>` | read a page; make one |
+| `koro page <page> --append / --section --with / --replace --with` | change just one part of a write-up |
+| `koro file 3 4 <page>` | put saved items on a page (or `inbox`) |
+| `koro guide [topic]` | the full manual, for people and agents |
 
 Add `--json` to any command for machine-readable output (agents always use it). With several
 books, commands use the most recent one unless you pass `-e "<title or id>"`.
@@ -212,8 +257,9 @@ koro/                    Python CLI (pypdf, pdfplumber)
   pdf.py                 outline + per-section text from PDFs
   figures.py             find figures by caption, crop and render them
   payload.py             lesson payload validator (incl. copy check)
-  data/                  the agent skill and payload spec shipped with the CLI
-plugin/                  Claude Code plugin (skills: learn, continue, start, status, add, ingest)
+  data/                  the agent skill, the guide (`koro guide`) and payload spec shipped with the CLI
+plugin/                  Claude Code plugin (skills: learn, continue, start, status, add, ingest,
+                         save, saved, notebook)
 .claude-plugin/          marketplace manifest
 supabase/migrations/     schema + functions (applied to the koro project)
 supabase/functions/koro-mcp/  the claude.ai connector (remote MCP server, Deno, no deps)
@@ -232,7 +278,7 @@ Apply `supabase/migrations/*.sql` in filename order (`supabase link --project-re
 
 ## Not built yet
 
-A curriculum built from saved items, the exercise runner (Fly.io containers), OAuth for the
+A curriculum built from saved items and notebook pages, the exercise runner (Fly.io containers), OAuth for the
 connector, cross-book topic linking, and multi-user sharing. The schema already has room for all of them.
 
 ## Releasing

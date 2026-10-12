@@ -198,7 +198,9 @@ def saved_line(s: dict) -> str:
     tags = " ".join("#" + t for t in s.get("tags") or [])
     extra = s.get("url") or ((s.get("file") or {}).get("filename"))
     head = f"{STATUS_MARK.get(s.get('status'), ' ')} #{s['no']:<4} {s['title']}"
-    tail = "  ".join(x for x in (f"[{s.get('kind')}]", tags, _ago(s.get("created_at", ""))) if x)
+    page = s.get("page") or {}
+    where = f"in {page.get('number')} {page.get('title')}" if page else ""
+    tail = "  ".join(x for x in (f"[{s.get('kind')}]", tags, where, _ago(s.get("created_at", ""))) if x)
     out = [head, f"        {tail}"]
     if extra and extra != s["title"]:
         out.append(f"        {extra}")
@@ -206,9 +208,15 @@ def saved_line(s: dict) -> str:
 
 
 def saved_saved(s: dict) -> str:
+    if s.get("saved") is False:
+        return "Nothing saved."
     verb = "Already saved, updated" if s.get("existed") else "Saved"
-    return f"{verb} #{s['no']}: {s['title']}" + (f"  ({' '.join('#' + t for t in s['tags'])})" if s.get("tags") else "") \
-        + "\nSee everything with `koro saved`."
+    page = s.get("page") or {}
+    where = f" on page {page['number']} {page['title']}" if page else " to your inbox"
+    return (f"{verb} #{s['no']}{where}: {s['title']}"
+            + (f"  ({' '.join('#' + t for t in s['tags'])})" if s.get("tags") else "")
+            + ("\nFile it later with `koro file " + str(s["no"]) + " <page>`; see pages with `koro notebook`."
+               if not page else ""))
 
 
 def saved_list(r: dict) -> str:
@@ -231,7 +239,7 @@ def saved_list(r: dict) -> str:
 def saved_item(s: dict) -> str:
     out = [saved_line(s)]
     if s.get("body"):
-        out += ["", _wrap(s["body"])]
+        out += [""] + _verbatim(s["body"])
     ctx = {k: v for k, v in (s.get("context") or {}).items() if v}
     if ctx:
         out += ["", "  from: " + ", ".join(f"{k} {v}" for k, v in ctx.items())]
@@ -338,3 +346,109 @@ def study_time(items: list) -> str:
 def generic(value: Any) -> str:
     import json
     return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _verbatim(text: str, indent: str = "  ") -> list:
+    """Text as written (code keeps its indentation), indented."""
+    return [indent + line if line.strip() else "" for line in str(text).rstrip().split("\n")]
+
+
+# ---------------------------------------------------------------------------
+# Notebook
+# ---------------------------------------------------------------------------
+def _count(n, word="item") -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}" if n else ""
+
+
+def notebook(r: dict) -> str:
+    pages = r.get("pages") or []
+    inbox = r.get("inbox") or {}
+    out = []
+    if r.get("scope") in (None, "inbox"):
+        out.append(f"{'':<9}Inbox{'':<29}{_count(inbox.get('items', 0)) or 'empty'}")
+        for it in inbox.get("item_list") or []:
+            out.append(f"{'':<13}#{it['no']:<4} {it['title']}  [{it['kind']}]")
+    if not pages and r.get("scope") != "inbox":
+        out.append("\nNo pages yet. Make one: koro page new \"Signals\"   (and -p <parent> to nest it)")
+    for pg in pages:
+        num = pg["number"]
+        name = ("  " * pg["depth"]) + pg["title"]
+        mark = STATUS_MARK.get(pg["status"], " ")
+        status = f"{mark} {pg['status']}" if pg["status"] != "inbox" else ""
+        bits = "  ".join(x for x in (status, _count(pg.get("items", 0)), "✎" if pg.get("has_writeup") else "") if x)
+        out.append(f"{num:<8} {name:<34} {bits}".rstrip())
+        for it in pg.get("item_list") or []:
+            out.append(f"{'':<9}{'  ' * pg['depth']}  #{it['no']:<4} {it['title']}  [{it['kind']}]")
+    out.append("\n✎ has a write-up  ·  koro page <number> to open one  ·  koro save ... -p <number> to add to it")
+    return "\n".join(out)
+
+
+def _page_head(r: dict) -> str:
+    path = " › ".join(f"{p['number']} {p['title']}" for p in r.get("path") or [])
+    mark = STATUS_MARK.get(r.get("status"), " ")
+    tags = " ".join("#" + t for t in r.get("tags") or [])
+    head = f"{r.get('number')}  {r.get('title')}"
+    meta = "  ·  ".join(x for x in (f"{mark} {r.get('status')}", tags, f"v{r.get('version')}") if x)
+    return "\n".join(x for x in (path, head + "    " + meta, "─" * min(88, max(40, len(head) + len(meta) + 4))) if x)
+
+
+def page(r: dict) -> str:
+    out = [_page_head(r)]
+    if r.get("body"):
+        out += _verbatim(r["body"], "")
+    else:
+        out.append(f"(no write-up yet: koro page {r.get('number')} --edit, or --append \"...\")")
+    heads = r.get("headings") or []
+    if heads:
+        out += ["", "Sections: " + " · ".join(h["heading"] for h in heads)]
+    subs = r.get("subpages") or []
+    if subs:
+        out += ["", "Sub-pages:"] + [f"  {s['number']:<8} {s['title']}  {_count(s.get('items', 0))}".rstrip() for s in subs]
+    items = r.get("item_list") or []
+    if items:
+        out += ["", "Items:"]
+        for it in items:
+            if "body" in it or "context" in it or it.get("id"):
+                out.append(saved_item(it))
+            else:
+                extra = it.get("url") or it.get("file") or (f"{it['chars']} chars" if it.get("chars") else "")
+                out.append(f"  #{it['no']:<4} {it['kind']:<8} {it['title']}" + (f"   {extra}" if extra else ""))
+    return "\n".join(out)
+
+
+def page_section(r: dict) -> str:
+    pg = r.get("page") or {}
+    out = [f"{pg.get('number')} {pg.get('title')}  ›  {r.get('heading')}   (page v{r.get('version')})", ""]
+    out += _verbatim(r.get("text") or "(empty section)", "")
+    return "\n".join(out)
+
+
+def page_created(r: dict) -> str:
+    if r.get("existed"):
+        return f"Page {r['number']} {r['title']} already exists (nothing new created)."
+    return f"Made page {r['number']} {r['title']}. Add to it with: koro save \"...\" -p {r['number']}"
+
+
+def page_written(r: dict) -> str:
+    if r.get("changed") is False:
+        return f"No change to {r.get('number')} {r.get('title')}."
+    return f"Saved {r.get('number')} {r.get('title')} (version {r.get('version')}). Undo with --history / --restore."
+
+
+def page_history(r: dict) -> str:
+    out = [f"{r.get('number')} {r.get('title')}: now version {r.get('version')}"]
+    for h in r.get("history") or []:
+        start = (h.get("starts") or "").replace("\n", " ")
+        out.append(f"  v{h['version']:<4} {str(h.get('replaced_at', ''))[:16]}  {h.get('chars', 0)} chars  {start[:60]}")
+    if len(out) == 1:
+        out.append("  (no earlier versions)")
+    else:
+        out.append(f"\nBring one back: koro page {r.get('number')} --restore <version>")
+    return "\n".join(out)
+
+
+def filed(r: dict) -> str:
+    pg = r.get("page")
+    where = f"page {pg['number']} {pg['title']}" if pg else "the inbox"
+    nums = ", ".join(f"#{i['no']}" for i in r.get("items") or [])
+    return f"Moved {nums} to {where}."
