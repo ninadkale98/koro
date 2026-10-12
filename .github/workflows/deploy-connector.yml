@@ -1,0 +1,37 @@
+# Deploys the claude.ai connector (Supabase Edge Function koro-mcp) when its code changes
+# on main. Needs one repository secret: SUPABASE_ACCESS_TOKEN (a personal access token from
+# https://supabase.com/dashboard/account/tokens). Without it the job is skipped.
+name: deploy-connector
+
+on:
+  push:
+    branches: [main]
+    paths: ["supabase/functions/koro-mcp/**", ".github/workflows/deploy-connector.yml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: qrfgbkgbwtojxcylmhtl
+    steps:
+      - name: Skip without a token
+        if: env.SUPABASE_ACCESS_TOKEN == ''
+        run: echo "::notice::Add the SUPABASE_ACCESS_TOKEN repository secret to deploy the connector from GitHub."
+      - uses: actions/checkout@v4
+        if: env.SUPABASE_ACCESS_TOKEN != ''
+      - uses: actions/setup-node@v4
+        if: env.SUPABASE_ACCESS_TOKEN != ''
+        with:
+          node-version: "22"
+      - name: Test
+        if: env.SUPABASE_ACCESS_TOKEN != ''
+        run: node --experimental-strip-types --no-warnings --test supabase/functions/koro-mcp/mcp.test.ts
+      - uses: supabase/setup-cli@v1
+        if: env.SUPABASE_ACCESS_TOKEN != ''
+        with:
+          version: latest
+      - name: Deploy
+        if: env.SUPABASE_ACCESS_TOKEN != ''
+        run: supabase functions deploy koro-mcp --project-ref "$PROJECT_REF" --no-verify-jwt --use-api

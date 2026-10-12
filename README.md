@@ -86,8 +86,10 @@ save?*, *How am I doing?*
 Manage URLs with `koro connector list` and `koro connector revoke <id>`. Only a SHA-256 hash
 of each token is stored. Opening the URL in a browser shows a small status page; add
 `?selftest=1&figure=2.13` to check the tools and figure storage end to end.
-Redeploying: `supabase functions deploy koro-mcp --no-verify-jwt` (the function checks the
-token itself, so the platform JWT check must be off).
+Deploying: a push to main that changes `supabase/functions/koro-mcp/` deploys it through
+GitHub Actions once the repository has a `SUPABASE_ACCESS_TOKEN` secret (a personal access
+token from the Supabase dashboard). By hand: `supabase functions deploy koro-mcp --no-verify-jwt`
+(the function checks the token itself, so the platform JWT check must be off).
 
 ## Save things to learn later
 
