@@ -2,7 +2,7 @@
 description: Parse an added source into koro lessons, section by section (resumable on any machine).
 argument-hint: "[book title]"
 disable-model-invocation: true
-allowed-tools: Bash(koro *)
+allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 Load the `koro:learn` skill with the Skill tool and follow it for this request:
 

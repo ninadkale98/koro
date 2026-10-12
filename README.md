@@ -14,15 +14,17 @@ Koro remembers what you've covered, what you've proved you know, and where you'r
 ## Morning checklist (about 10 minutes)
 
 Your Supabase project `koro` already has the full schema and **Inference Engineering**
-(Philip Kiely) ingested: 145 sections, 210 concepts, 435 objectives, 384 prerequisite links.
-Your learner profile ("Ninad") exists. Nothing else is needed on the database side.
+(Philip Kiely) ingested: 145 sections, 210 concepts, 435 objectives, 384 prerequisite links,
+and all 85 figures mapped to the lesson beat that explains them. Your learner profile
+("Ninad") exists. The one thing only your machine can do is upload your copy of the book
+(step 6).
 
 1. **Copy your secret key.** Supabase dashboard → your `koro` project → Project Settings →
    API Keys → a secret key (`sb_secret_...`). The legacy `service_role` key works too.
 2. **Install the CLI** (Python 3.9+):
    ```bash
-   pip install git+https://github.com/ninadkale98/koro
-   # or: pipx install git+https://github.com/ninadkale98/koro
+   pip install --upgrade git+https://github.com/ninadkale98/koro
+   # or: pipx install --force git+https://github.com/ninadkale98/koro
    ```
 3. **Connect:**
    ```bash
@@ -43,9 +45,15 @@ Your learner profile ("Ninad") exists. Nothing else is needed on the database si
    ```
    Then `/koro:continue` starts a session. Prefer typing `/koro continue`? Run
    `koro install-skill` once instead (installs a user-level `/koro` skill).
-6. **Optional:** tell koro where the PDF lives on this machine, so future re-parsing can read it:
-   `koro add ~/path/to/Inference_Engineering.pdf` (it recognizes the existing book and won't
-   duplicate it).
+6. **Store the complete book (once, from any one machine):**
+   ```bash
+   koro ingest assets --pdf ~/path/to/Inference_Engineering.pdf
+   ```
+   It checks the file is the same one the lessons were built from, then uploads the PDF,
+   every section's text and all 85 figure images to a private Storage bucket (`koro-private`,
+   readable only with your secret key). About a minute; re-running only uploads what's
+   missing. After that, lessons show figures in the terminal (`koro figure 2.13 --open`) and in
+   Claude chats, and Claude can check the book's exact wording when you ask.
 
 If `koro continue` fails with 401/403, the key is wrong or is the publishable key. If it fails
 with 404, the schema isn't on that project.
@@ -63,14 +71,18 @@ can learn in any Claude chat on claude.ai or Claude Desktop, with the same progr
    *Continue learning* prompt from the connector's prompts.
 
 Claude then teaches beat by beat, asks the checks, and records every answer, exactly like
-`/koro:continue`. Tools: `continue_learning`, `start_book`, `next_concept`, `get_lesson`,
-`record_answer`, `dispute_verdict`, `mark_known`, `table_of_contents`, `progress_report`,
-`search_book`, `list_library`, `set_book_status`, `restart_book`, `set_goal`,
-`save_learner_summary`, `study_time`. Prompts: *Continue learning*, *Study a section*,
-*Quiz me*, *How am I doing?*
+`/koro:continue`. When a beat has a figure, Claude calls `show_figure`: it sees the book's
+image, walks you through it, and gives you a link to open it (links last an hour). When you
+ask what the book says exactly, it calls `read_section` and answers from the original text.
+Tools: `continue_learning`, `start_book`, `next_concept`, `get_lesson`, `show_figure`,
+`read_section`, `record_answer`, `dispute_verdict`, `mark_known`, `table_of_contents`,
+`progress_report`, `search_book`, `list_library`, `set_book_status`, `restart_book`,
+`set_goal`, `save_learner_summary`, `study_time`. Prompts: *Continue learning*, *Study a
+section*, *Quiz me*, *How am I doing?*
 
 Manage URLs with `koro connector list` and `koro connector revoke <id>`. Only a SHA-256 hash
-of each token is stored. Opening the URL in a browser shows a small status page.
+of each token is stored. Opening the URL in a browser shows a small status page; add
+`?selftest=1&figure=2.13` to check the tools and figure storage end to end.
 Redeploying: `supabase functions deploy koro-mcp --no-verify-jwt` (the function checks the
 token itself, so the platform JWT check must be off).
 
@@ -88,7 +100,10 @@ From a plain terminal:
 | `koro continue` | pick up whatever you were last reading |
 | `koro start [section] -e "<book>"` | start a book, or focus on a section (e.g. `5.3`) |
 | `koro toc` | table of contents with ✓ ◐ · ○ progress per section |
-| `koro teach <concept key>` | read a lesson (marks it seen) |
+| `koro teach <concept key>` | read a lesson (marks it seen); figures appear at their beat |
+| `koro figure 2.13 --open` | open one of the book's figures (`--url` for a temporary link) |
+| `koro figures [section or concept]` | list figures (default: the whole book) |
+| `koro read 2.4.1` | the original text of a section, for your eyes only |
 | `koro next [--node 5.3]` | what to learn next, and why |
 | `koro status` | strengths, gaps with misconceptions, fading concepts, time this week |
 | `koro search "kv cache"` | where a topic is covered |
@@ -100,6 +115,7 @@ From a plain terminal:
 | `koro restart --yes` | start a book over (history kept) |
 | `koro library` | everything you've added |
 | `koro connector new` / `list` / `revoke <id>` | manage the claude.ai connector URL |
+| `koro ingest assets --pdf <file>` | store the complete source privately (PDF, section texts, figures) |
 
 Add `--json` to any command for machine-readable output (agents always use it). With several
 books, commands use the most recent one unless you pass `-e "<title or id>"`.
@@ -107,7 +123,8 @@ books, commands use the most recent one unless you pass `-e "<title or id>"`.
 ## Adding a new book or paper
 
 ```bash
-koro add ~/papers/vllm.pdf          # dedupes by file hash and ISBN/arXiv/DOI, builds the outline
+koro add ~/papers/vllm.pdf          # dedupes by file hash and ISBN/arXiv/DOI, builds the outline,
+                                    # and stores the PDF, section texts and figures privately
 ```
 Then in Claude Code run `/koro:ingest` (or ask any agent to follow AGENTS.md → "Parsing a
 source"). The agent claims one section at a time (`koro ingest next`), writes a lesson payload
@@ -115,7 +132,9 @@ in its own words, checks it (`koro ingest check`, which also rejects copied pass
 it (`koro ingest save`), and finishes with `koro ingest finalize`. Claims are leases, so you
 can start on one laptop and finish on another, or run two machines at once. PDFs need real
 text (not scans). For repos or PDFs without bookmarks, write an outline JSON and upload it
-with `koro ingest outline`.
+with `koro ingest outline`. Figures are found from their captions ("Figure 2.13: ...");
+`koro ingest next` lists each section's figures, and the agent puts a figure's label in the
+beat it illustrates, which links it to that concept.
 
 ## How it works
 
@@ -147,23 +166,29 @@ with `koro ingest outline`.
 - **Security:** row-level security is on for every table with no policies, and every
   function is revoked from `anon`/`authenticated`, so only the secret key can read or write.
   Single-user for now; per-user policies come with sharing.
-- **Copyright:** the database never stores a source's raw text. Lessons are teaching notes
-  in the agent's own words (ingest rejects any 10-word run copied from the source) with page
-  numbers pointing back to your copy.
+- **Your copy stays yours:** lessons are teaching notes in the agent's own words (ingest
+  rejects any 10-word run copied from the source) with page numbers pointing back to the
+  book. The original itself (the PDF, each section's text, the figure images) is uploaded
+  from your own copy into a private bucket and locked tables that only your secret key can
+  read. It is used to show you figures and to ground answers, never shared, and links to a
+  figure expire after an hour.
+- **Figures:** each is an `assets` row (label, caption, page, crop box) linked to the concept
+  and beat that explains it; the image lives at `koro-private/<book id>/figures/fig-<label>.png`.
 
 ## Repo layout
 
 ```
-koro/                    Python CLI (stdlib + pypdf)
-  cli.py client.py       commands → Supabase RPC
+koro/                    Python CLI (pypdf, pdfplumber)
+  cli.py client.py       commands → Supabase RPC and Storage
   pdf.py                 outline + per-section text from PDFs
+  figures.py             find figures by caption, crop and render them
   payload.py             lesson payload validator (incl. copy check)
   data/                  the agent skill and payload spec shipped with the CLI
 plugin/                  Claude Code plugin (skills: learn, continue, start, status, add, ingest)
 .claude-plugin/          marketplace manifest
 supabase/migrations/     schema + functions (applied to the koro project)
 supabase/functions/koro-mcp/  the claude.ai connector (remote MCP server, Deno, no deps)
-supabase/tests/          live end-to-end test that rolls itself back
+supabase/tests/          live end-to-end tests that roll themselves back
 docs/node-payload.md     the lesson payload format
 AGENTS.md                instructions for Codex and other agents (generated)
 tools/sync_docs.py       regenerates the plugin skill / AGENTS.md copies

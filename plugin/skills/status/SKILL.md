@@ -2,7 +2,7 @@
 description: Show what you've mastered, your gaps and misconceptions, fading concepts and study time in koro.
 argument-hint: "[book title]"
 disable-model-invocation: true
-allowed-tools: Bash(koro *)
+allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 Load the `koro:learn` skill with the Skill tool and follow it for this request:
 

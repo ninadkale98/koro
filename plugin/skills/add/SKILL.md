@@ -2,7 +2,7 @@
 description: Add a PDF (book or paper) to koro and offer to parse it into lessons.
 argument-hint: "<path to pdf>"
 disable-model-invocation: true
-allowed-tools: Bash(koro *)
+allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 Load the `koro:learn` skill with the Skill tool and follow it for this request:
 

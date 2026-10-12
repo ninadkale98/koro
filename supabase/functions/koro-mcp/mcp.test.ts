@@ -2,8 +2,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  INSTRUCTIONS, PROMPTS, TOOLS, cachedTokenCheck, createHandler, extractToken, makeRpc, secretKeyFromEnv, validateArgs,
+  INSTRUCTIONS, PROMPTS, TOOLS, cachedTokenCheck, createHandler, extractToken, makeRpc, makeStorage, secretKeyFromEnv,
+  toBase64, validateArgs,
 } from "./mcp.ts";
+import type { Storage } from "./mcp.ts";
 
 const L = "fea6d85b-2166-458c-ba61-6bed113c1819";
 const E = "d48ee9db-7099-48ec-a59e-3108bcd9434a";
@@ -31,7 +33,29 @@ const SIGNATURES: Record<string, string[]> = {
   koro_study_time: ["p_learner", "p_since", "p_entity"],
   koro_resolve_entity: ["p_ref"],
   koro_check_connector_token: ["p_token"],
+  koro_figure: ["p_entity", "p_label"],
+  koro_read_section: ["p_entity", "p_node_key"],
 };
+
+const FIG = { asset_id: "f1", label: "2.13", caption: "A roofline chart.", page: 65, bbox: [1, 2, 3, 4],
+  bucket: "koro-private", storage_path: `${E}/figures/fig-2.13.png`, uploaded: true, width: 800, height: 600,
+  concept_key: "2.4.1/arithmetic-intensity-roofline", node_key: "2.4.1" };
+const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 255]);
+function fakeStorage(fail = false): Storage & { signed: string[] } {
+  const signed: string[] = [];
+  return {
+    signed,
+    sign: async (bucket, path, expiresIn) => {
+      if (fail) throw new Error("storage down");
+      signed.push(`${bucket}/${path}`);
+      return `https://proj.supabase.co/storage/v1/object/sign/${bucket}/${path}?token=t&e=${expiresIn}`;
+    },
+    download: async () => {
+      if (fail) throw new Error("storage down");
+      return PNG;
+    },
+  };
+}
 
 const ROLLUP = { concepts: 210, mastered: 3, learning: 1, seen: 0, untouched: 206, mastery: 0.02, status: "learning" };
 const CARD = { key: "0/inference-stack-layers", name: "The three layers", status: "untouched" };
@@ -48,7 +72,10 @@ const CANNED: Record<string, unknown> = {
   koro_continue: START,
   koro_start: START,
   koro_next_concept: { reason: "next", concept: CARD },
-  koro_teach: { concept: { key: CARD.key, teaching_content: { hook: "h", beats: [], checks: [] } }, objectives: [] },
+  koro_teach: { concept: { key: CARD.key, teaching_content: { hook: "h", beats: [], checks: [] } }, objectives: [], figures: [] },
+  koro_figure: { ...FIG, entity: { id: E, title: "Inference Engineering" } },
+  koro_read_section: { section: { key: "2.4.1", title: "Roofline", page_start: 64, page_end: 66 }, text: "Original words.",
+                       subsections: [], figures: [FIG], concepts: [] },
   koro_assess: { assessment_id: "a1", status: "learning", objectives: [] },
   koro_dispute: { dispute_id: "d1", status: "mastered" },
   koro_mark_known: { marked_known: 3 },
@@ -64,7 +91,7 @@ const CANNED: Record<string, unknown> = {
   koro_study_time: [{ minutes: 30 }],
 };
 
-function setup(overrides: Record<string, unknown> = {}) {
+function setup(overrides: Record<string, unknown> = {}, storage?: Storage) {
   const calls: [string, Record<string, unknown>][] = [];
   const responses = { ...CANNED, ...overrides };
   const rpc = async (fn: string, params: Record<string, unknown>) => {
@@ -77,7 +104,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     return r;
   };
   const checkToken = async (t: string) => (t === TOKEN ? { learner_id: L, learner: "Ninad" } : null);
-  const handler = createHandler({ rpc, checkToken, now: () => new Date("2026-10-12T12:00:00Z") });
+  const handler = createHandler({ rpc, checkToken, storage, now: () => new Date("2026-10-12T12:00:00Z") });
   const post = async (body: unknown, url = BASE) => {
     const res = await handler(new Request(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
     return { status: res.status, body: res.status === 202 ? null : await res.json() };
@@ -339,4 +366,93 @@ test("token cache: hits skip the database, misses expire quickly", async () => {
   t = 61_000;
   await check(TOKEN);
   assert.equal(n, 2);
+});
+
+test("get_lesson links stored figures and hides storage details", async () => {
+  const storage = fakeStorage();
+  const pending = { ...FIG, label: "2.12", uploaded: false };
+  const { call } = setup({ koro_teach: { concept: { key: "2.4.1/x", teaching_content: { beats: [{ figures: ["2.13"] }] } },
+                                         objectives: [], figures: [pending, FIG] } }, storage);
+  const p = payload(await call("get_lesson", { concept_key: "2.4.1/x" }));
+  assert.equal(p.figures.length, 2);
+  assert.equal(p.figures[0].url, null);
+  assert.match(p.figures[1].url, /^https:\/\/proj\.supabase\.co\/storage\/v1\/object\/sign\/koro-private\/.+fig-2\.13\.png\?token=t&e=3600$/);
+  for (const f of p.figures) for (const k of ["storage_path", "bucket", "asset_id", "bbox"]) assert.equal(f[k], undefined, k);
+  assert.match(p.how_to_teach, /show_figure/);
+  assert.deepEqual(storage.signed, [`koro-private/${E}/figures/fig-2.13.png`]);
+});
+
+test("show_figure returns the image and a link", async () => {
+  const { call, last } = setup({}, fakeStorage());
+  const r = await call("show_figure", { label: "Figure 2.13" });
+  assert.deepEqual(last("koro_figure"), { p_entity: E, p_label: "Figure 2.13" });
+  const [img, text] = r.result.content;
+  assert.equal(img.type, "image");
+  assert.equal(img.mimeType, "image/png");
+  assert.deepEqual(new Uint8Array(Buffer.from(img.data, "base64")), PNG);
+  const meta = JSON.parse(text.text);
+  assert.equal(meta.figure, "Figure 2.13");
+  assert.equal(meta.page, 65);
+  assert.match(meta.url, /token=t/);
+  assert.equal(meta.storage_path, undefined);
+});
+
+test("show_figure without an upload, without storage, or with storage down: caption only", async () => {
+  const notUp = payload(await setup({ koro_figure: { ...FIG, uploaded: false } }, fakeStorage()).call("show_figure", { label: "2.13" }));
+  assert.equal(notUp.url, null);
+  assert.match(notUp.note, /koro ingest assets/);
+  const noStorage = payload(await setup().call("show_figure", { label: "2.13" }));
+  assert.equal(noStorage.caption, "A roofline chart.");
+  const down = await setup({}, fakeStorage(true)).call("show_figure", { label: "2.13" });
+  assert.equal(down.result.isError, undefined);
+  assert.equal(JSON.parse(down.result.content[0].text).url, null);
+  const unknown = await setup({ koro_figure: new Error("koro_figure: no figure 9.9 in this book") }).call("show_figure", { label: "9.9" });
+  assert.equal(unknown.result.isError, true);
+});
+
+test("read_section returns the original text for grounding", async () => {
+  const { call, last } = setup({}, fakeStorage());
+  const p = payload(await call("read_section", { section: "2.4.1" }));
+  assert.deepEqual(last("koro_read_section"), { p_entity: E, p_node_key: "2.4.1" });
+  assert.equal(p.text, "Original words.");
+  assert.match(p.note, /own words/);
+  assert.match(p.figures[0].url, /token=t/);
+  const empty = payload(await setup({ koro_read_section: { section: { key: "2" }, text: null, figures: [] } }).call("read_section", { section: "2" }));
+  assert.match(empty.note, /koro ingest assets/);
+});
+
+test("selftest can check a figure end to end without exposing the link", async () => {
+  const { handler } = setup({}, fakeStorage());
+  const st = await (await handler(new Request(BASE + "?selftest=1&figure=2.13"))).json();
+  assert.deepEqual(st.selftest.show_figure.content, ["image image/png 12 bytes", "text"]);
+  assert.equal(st.selftest.show_figure.has_url, true);
+  assert.equal(JSON.stringify(st).includes("token=t"), false);
+});
+
+test("makeStorage: sign and download against the Storage API", async () => {
+  const seen: any[] = [];
+  const fakeFetch = (async (url: string, init: any = {}) => {
+    seen.push({ url, init });
+    if (url.includes("/missing")) return new Response(JSON.stringify({ message: "Object not found" }), { status: 400 });
+    if (url.includes("/object/sign/")) return new Response(JSON.stringify({ signedURL: "/object/sign/b/a%20b/c.png?token=xyz" }));
+    return new Response(PNG);
+  }) as typeof fetch;
+  const st = makeStorage("https://p.supabase.co/", "sb_secret_k", fakeFetch);
+  assert.equal(await st.sign("b", "a b/c.png", 60), "https://p.supabase.co/storage/v1/object/sign/b/a%20b/c.png?token=xyz");
+  assert.equal(seen[0].url, "https://p.supabase.co/storage/v1/object/sign/b/a%20b/c.png");
+  assert.equal(seen[0].init.method, "POST");
+  assert.equal(seen[0].init.headers.apikey, "sb_secret_k");
+  assert.equal(seen[0].init.headers.Authorization, undefined);
+  assert.deepEqual(JSON.parse(seen[0].init.body), { expiresIn: 60 });
+  assert.deepEqual(await st.download("b", "x/fig-2.13.png"), PNG);
+  assert.equal(seen[1].url, "https://p.supabase.co/storage/v1/object/b/x/fig-2.13.png");
+  await assert.rejects(st.download("b", "missing/x.png"), /400 .*Object not found/);
+  const legacy = makeStorage("https://p", "eyJabc", fakeFetch);
+  await legacy.download("b", "y.png");
+  assert.equal(seen.at(-1).init.headers.Authorization, "Bearer eyJabc");
+});
+
+test("toBase64 matches Buffer for large inputs", () => {
+  const big = new Uint8Array(100_000).map((_, i) => (i * 31) % 256);
+  assert.equal(toBase64(big), Buffer.from(big).toString("base64"));
 });

@@ -2,7 +2,7 @@
 name: learn
 description: Teach the user a book, paper or repo with koro, their headless teacher agent. Use when the user says /koro, wants to learn/study/continue/resume a book, asks what they were reading, wants a lesson, quiz or progress report, or wants to add or parse a new source for learning.
 argument-hint: "[continue | start <book> [section] | status | toc | search <topic> | add <file.pdf> | ingest]"
-allowed-tools: Bash(koro *)
+allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 
 # Koro: teaching sessions
@@ -33,14 +33,21 @@ If `koro` is missing, install it: `pip install git+https://github.com/ninadkale9
 2. **Prerequisite gate.** If `reason` is `prerequisite`, say which concept they're missing and
    offer: learn it first (recommended), or go ahead anyway (`koro teach <wanted key>`).
 3. **Teach.** `koro teach <concept key> --json` returns `teaching_content` (hook, beats,
-   checks, optional exercise, takeaway), the learner's `objectives` with status and
-   misconceptions, `prerequisites`, `recent_evidence`, and the source pages.
+   checks, optional exercise, takeaway), the concept's `figures`, the learner's `objectives`
+   with status and misconceptions, `prerequisites`, `recent_evidence`, and the source pages.
    - Open with the hook. Then teach **one beat at a time** in your own words: short, concrete,
      a minute of reading. Show a beat's `diagram` in a code block and use its `example`.
      Pause after each beat ("make sense?") so they can steer. Don't dump all beats at once.
    - If an objective is a `gap` or has a `misconception`, aim the explanation straight at it.
    - Point to the pages (`node.page_start`-`page_end`) for the original text. Never claim to
      quote the book; the lessons are paraphrased teaching notes.
+   - **Figures.** A beat may list `figures` (labels such as `"2.13"`; captions and pages are
+     in the lesson's `figures`). At that beat run `koro figure <label> --open --json`: it
+     opens the book's figure on the learner's screen and returns a local `path`. Read that
+     PNG yourself, then walk them through it in your own words.
+   - **Grounding.** When they ask what the book says exactly, or you're unsure of a detail,
+     `koro read <section key> --json` returns that section's original text (stored privately
+     for them). Answer from it in your own words; quote at most a sentence or two, with pages.
 4. **Check every objective.** Ask the checks one at a time and wait for an answer. Judge it
    against `answer_guide`: `correct`, `partial`, or `wrong`. Be fair and honest: never round
    up to be nice. Record it immediately:
@@ -69,6 +76,8 @@ If `koro` is missing, install it: `pip install git+https://github.com/ninadkale9
 | "I think my answer was right" | `koro dispute <assessment_id> --verdict correct --reason "..." --json` (ids are in `recent_evidence` and in each assess result) |
 | "Jump to 5.3" / "only this section" | `koro start 5.3 --json` (the section becomes the focus) |
 | "Where's X covered?" | `koro search "X" --json` |
+| "Show me the figure / diagram" | `koro figure <label> --open --json` (`koro figures <section or concept> --json` lists them) |
+| "What does the book say exactly?" | `koro read <section key> --json` |
 | "How am I doing?" | `koro status --json`: strengths, gaps with misconceptions, fading, time this week |
 | "Pause / I'm done with this book / drop it" | `koro pause` / `koro done` / `koro drop` |
 | "Start over" | confirm first, then `koro restart --yes` (history is kept) |
@@ -80,8 +89,11 @@ Several books: commands default to the most recent one; pass `-e "<title or id>"
 ## Adding a source
 
 `koro add <file.pdf> --json` deduplicates (same file or same ISBN/arXiv id returns the
-existing book), builds the outline from the PDF's bookmarks, and remembers where the file
-is on this machine. Then offer to parse it.
+existing book), builds the outline from the PDF's bookmarks, remembers where the file is on
+this machine, and stores the complete source privately: the PDF, every section's text and
+every figure (a private bucket only the learner's key can read). Then offer to parse it.
+For a book added before figures existed, or if `koro teach` shows figures that aren't
+stored: `koro ingest assets --pdf <path> --json` (re-running only uploads what's missing).
 
 ## Parsing a source
 
@@ -91,7 +103,8 @@ resumable from any machine and several machines can work in parallel.
 1. Read the payload spec once: the `payload_spec` path in the `ingest next` output.
 2. Loop:
    - `koro ingest next --json` claims the next section and returns its `source_text`
-     (or a note to pass `--pdf <path>` / read the pages yourself).
+     (or a note to pass `--pdf <path>` / read the pages yourself) and its `figures`. Put each
+     figure's label in the `figures` list of the beat it illustrates.
    - Write the payload JSON to a temp file, in your own words (no 10-word run may match the
      source; the check enforces it).
    - `koro ingest check <file> --node <key> --json`, fix errors, then
@@ -110,4 +123,6 @@ for the koro project is connected, call the same functions with SQL, e.g.
 `select koro_teach('<learner>', '<concept key>', null, 'plugin');`,
 `select koro_assess(p_learner => '<learner>', p_concept_ref => '<key>', p_verdict => 'partial', p_objective_key => '<obj>', p_answer => '...', p_feedback => '...');`.
 Function names and parameters match the CLI (`koro_next_concept`, `koro_status`,
-`koro_toc`, `koro_search`, `koro_mark_known`, `koro_dispute`, `koro_set_summary`, ...).
+`koro_toc`, `koro_search`, `koro_mark_known`, `koro_dispute`, `koro_set_summary`,
+`koro_figure`, `koro_figures`, `koro_read_section`, ...). Figure images live in the private
+Storage bucket `koro-private`, so without the CLI describe figures from their captions.

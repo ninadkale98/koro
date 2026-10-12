@@ -2,7 +2,7 @@
 description: Start or jump into a book (and optionally a section) with koro.
 argument-hint: "<book title> [section key]"
 disable-model-invocation: true
-allowed-tools: Bash(koro *)
+allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 Load the `koro:learn` skill with the Skill tool and follow it for this request:
 

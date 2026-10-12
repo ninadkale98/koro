@@ -1,7 +1,7 @@
 ---
 description: Pick up whatever you were last studying with koro and teach the next concept.
 disable-model-invocation: true
-allowed-tools: Bash(koro *)
+allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 Load the `koro:learn` skill with the Skill tool and follow it for this request:
 

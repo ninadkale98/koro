@@ -78,6 +78,8 @@ def lesson(r: dict) -> str:
            f"{node.get('title', '')}  (pp. {node.get('page_start')}-{node.get('page_end')})", ""]
     if tc.get("hook"):
         out += [_wrap(tc["hook"], ""), ""]
+    figs = {f.get("label"): f for f in r.get("figures") or []}
+    shown = set()
     for i, b in enumerate(tc.get("beats") or [], 1):
         out.append(f"{i}. {b.get('title', '')}")
         out.append(_wrap(b.get("explain", "")))
@@ -86,7 +88,13 @@ def lesson(r: dict) -> str:
             out += ["    " + line for line in str(b["diagram"]).splitlines()]
         if b.get("example"):
             out.append(_wrap("Example: " + b["example"]))
+        for label in _beat_figures(b):
+            shown.add(label)
+            out.append(figure_line(figs.get(label) or {"label": label}))
         out.append("")
+    rest = [f for label, f in figs.items() if label not in shown]
+    if rest:
+        out += ["Figures:"] + [figure_line(f) for f in rest] + [""]
     if tc.get("takeaway"):
         out += [_wrap("Takeaway: " + tc["takeaway"], ""), ""]
     out.append("Objectives:")
@@ -104,6 +112,71 @@ def lesson(r: dict) -> str:
     ex = tc.get("exercise")
     if ex:
         out += ["", f"Exercise ({ex.get('language', '')}):", _wrap(ex.get("prompt", ""))]
+    return "\n".join(out)
+
+
+def _beat_figures(beat: dict) -> list:
+    labels = beat.get("figures") or []
+    if isinstance(beat.get("figure"), str):
+        labels = list(labels) + [beat["figure"]]
+    return [str(x) for x in labels]
+
+
+def figure_line(f: dict) -> str:
+    caption = f.get("caption") or ""
+    page = f" (p.{f['page']})" if f.get("page") else ""
+    return textwrap.fill(f"  ▣ Figure {f.get('label')}{page}: {caption}  → koro figure {f.get('label')} --open",
+                         width=88, subsequent_indent="      ")
+
+
+def figure(r: dict) -> str:
+    out = [f"Figure {r['label']} (p.{r.get('page')}): {r.get('caption') or ''}", f"  {r['path']}"]
+    if r.get("url"):
+        out.append(f"  link (temporary): {r['url']}")
+    if r.get("note"):
+        out.append(f"  {r['note']}")
+    return "\n".join(out)
+
+
+def figure_list(items: list) -> str:
+    if not items:
+        return "No figures here."
+    out = []
+    for f in items:
+        where = f.get("concept_key") or f.get("node_key") or ""
+        mark = "✓" if f.get("uploaded") else "…"
+        out.append(textwrap.fill(f"{mark} {f['label']:<6} p.{f.get('page')}  {f.get('caption') or ''}  [{where}]",
+                                 width=100, subsequent_indent="           "))
+    out.append("\n✓ stored  … not uploaded yet (koro ingest assets)")
+    return "\n".join(out)
+
+
+def section(r: dict) -> str:
+    s = r.get("section") or {}
+    out = [f"{s.get('key')} {s.get('title', '')}  (pp. {s.get('page_start')}-{s.get('page_end')})", ""]
+    if r.get("text"):
+        out += [_wrap(p, "", 92) + "\n" for p in str(r["text"]).split("\n\n") if p.strip()]
+    else:
+        out += ["(No text stored for this section yet: run `koro ingest assets --pdf <path>` once.)", ""]
+    if r.get("figures"):
+        out += ["Figures:"] + [figure_line(f) for f in r["figures"]]
+    if r.get("subsections"):
+        out += ["", "Subsections: " + ", ".join(f"{c['key']} {c['title']}" for c in r["subsections"])]
+    if r.get("concepts"):
+        out += ["Concepts: " + ", ".join(c["key"] for c in r["concepts"])]
+    return "\n".join(out)
+
+
+def assets(r: dict) -> str:
+    src = r.get("source")
+    secs = r.get("sections")
+    figs = r.get("figures") or {}
+    sec_line = secs if isinstance(secs, str) else f"{secs.get('saved')} of {secs.get('of')} saved"
+    out = [f"{r.get('title') or 'Source'} — stored privately:",
+           f"  original PDF: {src}",
+           f"  section texts: {sec_line}",
+           f"  figures: {figs.get('total', 0)} total, {figs.get('uploaded_now', 0)} uploaded now"
+           + (f" ({r['figures_detected']} detected)" if "figures_detected" in r else "")]
     return "\n".join(out)
 
 

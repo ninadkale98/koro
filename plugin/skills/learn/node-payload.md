@@ -2,8 +2,10 @@
 
 Ingest works one outline node at a time. The coding agent (Claude Code, Codex, ...) reads
 the node's text, writes one JSON payload, checks it with `koro ingest check`, and saves it
-with `koro ingest save`. The database never stores the source's raw text: everything here
-is written in the agent's own words, plus page numbers that point back to the original.
+with `koro ingest save`. Lessons are written in the agent's own words, with page numbers
+that point back to the original. (The original itself, meaning the PDF, each section's text
+and the figures, is stored separately and privately by `koro ingest assets`, for grounding
+and for showing figures; it is never part of a lesson.)
 
 ## Shape
 
@@ -28,7 +30,8 @@ is written in the agent's own words, plus page numbers that point back to the or
             "title": "Short beat title",
             "explain": "3-6 sentences, concrete, in your own words.",
             "diagram": "optional plain-text diagram, <= 14 lines, <= 72 chars wide",
-            "example": "optional worked example, with the source's numbers where it has them"
+            "example": "optional worked example, with the source's numbers where it has them",
+            "figures": ["5.7"]
           }
         ],
         "checks": [
@@ -70,6 +73,11 @@ is written in the agent's own words, plus page numbers that point back to the or
   "Choose between... given..."). Every objective needs at least one check.
 - **Beats**: 2-4 per concept, ordered from intuition to detail. Use a diagram when the idea
   is spatial (memory hierarchy, pipeline stages, request flow).
+- **Figures**: `koro ingest next` lists the section's figures (`label`, `caption`, `page`).
+  Put each figure's label in the `figures` list of the beat it illustrates, so the teacher
+  shows it at that moment; saving links the figure to the concept. To look at one first:
+  `koro figure <label> --json` gives a local PNG path. Explain what a figure shows in the
+  beat's own words; don't describe it as if the learner can't see it.
 - **Checks**: questions that require reasoning: predict what happens, compare two options,
   calculate with given numbers, apply to a scenario. `answer_guide` says what a correct
   answer contains so the teacher can judge free-form answers.

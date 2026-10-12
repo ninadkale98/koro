@@ -5,15 +5,23 @@
 
 export type Rpc = (fn: string, params: Record<string, unknown>) => Promise<any>;
 export type Auth = { learner_id: string; learner?: string; token_id?: string; label?: string };
+// Private Storage bucket access (figures, the original file). Optional: without it,
+// lessons still work and figures are described from their captions.
+export type Storage = {
+  sign: (bucket: string, path: string, expiresIn?: number) => Promise<string>;
+  download: (bucket: string, path: string) => Promise<Uint8Array>;
+};
 export type Deps = {
   rpc: Rpc;
   checkToken: (token: string) => Promise<Auth | null>;
+  storage?: Storage;
   functionName?: string;
   version?: string;
   now?: () => Date;
 };
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
+const LINK_SECONDS = 3600; // signed figure links last an hour; show_figure makes a fresh one
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CLIENT = "connector";
@@ -24,6 +32,8 @@ Session loop
 1. Start with continue_learning (or start_book when they name a book or section). In 2-3 lines tell them where they stand and what is next and why (reason: resume = shown but never checked; gap = an earlier miss; fading = due for review; next; prerequisite; fallback; complete).
 2. If reason is prerequisite, name the missing concept and offer to learn it first (recommended) or go ahead anyway.
 3. get_lesson(concept_key). Open with the hook, then teach ONE beat at a time in your own words: short, concrete, about a minute of reading. Show a beat's diagram in a code block and use its example. Pause after each beat so they can steer. Aim straight at any objective marked gap or with a misconception. Point to the source pages for the original; never claim to quote the book.
+   Figures: when a beat lists figures (e.g. "figures": ["2.13"]), call show_figure for each at that beat. You will see the book's figure: walk the learner through what it shows in your own words and give them the figure's link so they can open the image (links last an hour; call show_figure again for a fresh one). The lesson's figures list has every figure for the concept.
+   Grounding: when the learner asks what the book says exactly, or you are unsure of a detail, call read_section for the section's original text and answer from it. Paraphrase; quote at most a sentence or two, and cite the pages.
 4. Check every objective: ask the lesson's checks one at a time and wait for the answer. Judge it against answer_guide as correct, partial or wrong, honestly (never round up). Call record_answer right away with the question, their answer condensed, your feedback, and a misconception when a specific wrong belief showed. Give a sentence or two of feedback. After partial or wrong, re-explain from a different angle and ask a fresh variant; record that too.
 5. For modality code or exercise, offer the exercise, judge it against solution_sketch, record with kind exercise.
 6. next_concept and repeat. Every few concepts and at the end of the session, call save_learner_summary with 2-3 sentences on where they stand.
@@ -41,7 +51,15 @@ const PROTOCOL_SHORT =
 // ---------------------------------------------------------------------------
 class ToolError extends Error {}
 
-type Ctx = { rpc: Rpc; learner: string; now: () => Date };
+// A tool result that is already MCP content (e.g. an image), not JSON to serialize.
+class Content {
+  content: unknown[];
+  constructor(content: unknown[]) {
+    this.content = content;
+  }
+}
+
+type Ctx = { rpc: Rpc; learner: string; now: () => Date; storage?: Storage };
 type Schema = { type: "object"; properties: Record<string, any>; required?: string[]; additionalProperties?: boolean };
 type Tool = {
   name: string;
@@ -65,6 +83,33 @@ async function resolveBook(ctx: Ctx, book?: string, required = true): Promise<st
     return null;
   }
   return pick.entity_id;
+}
+
+export function toBase64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+const NOT_UPLOADED =
+  "The image for this figure isn't stored yet. Describe it from its caption, and tell the learner to run " +
+  "`koro ingest assets --pdf <path to the book>` once on their computer to add every figure.";
+
+// Add a short-lived link to each stored figure (best effort: a figure without one is still described).
+async function withLinks(ctx: Ctx, figures: any[] | null | undefined): Promise<any[]> {
+  const list = Array.isArray(figures) ? figures : [];
+  return Promise.all(list.map(async (f) => {
+    const { asset_id: _a, bucket: _b, storage_path: _s, bbox: _x, width: _w, height: _h, ...rest } = f ?? {};
+    let url: string | null = null;
+    if (f?.uploaded && ctx.storage) {
+      try {
+        url = await ctx.storage.sign(f.bucket, f.storage_path, LINK_SECONDS);
+      } catch {
+        url = null;
+      }
+    }
+    return { ...rest, url };
+  }));
 }
 
 function shapeStart(r: any) {
@@ -118,12 +163,70 @@ export const TOOLS: Tool[] = [
   {
     name: "get_lesson",
     title: "Get a lesson",
-    description: "The full lesson for a concept: hook, beats (explanation, diagram, example), checks with answer guides, optional exercise, takeaway, source pages, plus the learner's objectives (with gaps and misconceptions), prerequisites and recent answers. Marks the concept as seen. Teach it one beat at a time.",
+    description: "The full lesson for a concept: hook, beats (explanation, diagram, example, and the book figures to show at that beat), checks with answer guides, optional exercise, takeaway, source pages, the concept's figures with links, plus the learner's objectives (with gaps and misconceptions), prerequisites and recent answers. Marks the concept as seen. Teach it one beat at a time.",
     inputSchema: { type: "object", properties: { concept_key: CONCEPT, book: BOOK }, required: ["concept_key"], additionalProperties: false },
     run: async (ctx, a) => {
       const entity = await resolveBook(ctx, a.book, false);
       const r = await ctx.rpc("koro_teach", { p_learner: ctx.learner, p_concept_ref: a.concept_key, p_entity: entity, p_client: CLIENT });
-      return { ...r, how_to_teach: PROTOCOL_SHORT };
+      const figures = await withLinks(ctx, r?.figures);
+      return {
+        ...r,
+        figures,
+        how_to_teach: PROTOCOL_SHORT + (figures.length ? " At a beat that lists figures, call show_figure(label) and walk the learner through it." : ""),
+      };
+    },
+  },
+  {
+    name: "show_figure",
+    title: "Show a figure",
+    description: "Show one of the book's figures (e.g. \"2.13\") at the beat that uses it. Returns the image, so you can see it, plus its caption, page and a link the learner can open (valid for an hour). Explain the figure in your own words.",
+    inputSchema: {
+      type: "object",
+      properties: { label: { type: "string", description: "Figure label, e.g. \"2.13\" (from a beat's figures or the lesson's figures)." }, book: BOOK },
+      required: ["label"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    run: async (ctx, a) => {
+      const entity = await resolveBook(ctx, a.book);
+      const f = await ctx.rpc("koro_figure", { p_entity: entity, p_label: a.label });
+      const [info] = await withLinks(ctx, [f]);
+      const meta = {
+        figure: `Figure ${f.label}`, caption: f.caption, page: f.page, book: f.entity?.title,
+        concept_key: f.concept_key, section: f.node_key, url: info.url,
+        note: info.url
+          ? "Give the learner this link to open the figure. Describe it in your own words; don't reproduce it."
+          : f.uploaded ? "The image is stored but a link couldn't be made right now; describe it from the caption." : NOT_UPLOADED,
+      };
+      if (!f.uploaded || !ctx.storage) return meta;
+      try {
+        const bytes = await ctx.storage.download(f.bucket, f.storage_path);
+        return new Content([
+          { type: "image", data: toBase64(bytes), mimeType: "image/png" },
+          { type: "text", text: JSON.stringify(meta) },
+        ]);
+      } catch {
+        return meta;
+      }
+    },
+  },
+  {
+    name: "read_section",
+    title: "Read a section",
+    description: "The original text of a section of the book (private to the learner), with its subsections, figures and concepts. Use it to ground answers in what the book actually says. Paraphrase; quote at most a sentence or two and cite the pages.",
+    inputSchema: { type: "object", properties: { section: SECTION, book: BOOK }, required: ["section"], additionalProperties: false },
+    annotations: { readOnlyHint: true },
+    run: async (ctx, a) => {
+      const entity = await resolveBook(ctx, a.book);
+      const r = await ctx.rpc("koro_read_section", { p_entity: entity, p_node_key: a.section });
+      return {
+        ...r,
+        figures: await withLinks(ctx, r?.figures),
+        text: r?.text ?? null,
+        note: r?.text
+          ? "Original text for grounding. Teach in your own words; quote at most a sentence or two."
+          : "The section's text isn't stored yet (the learner can run `koro ingest assets --pdf <path>` once). Use the section summary and its concepts' lessons.",
+      };
     },
   },
   {
@@ -411,7 +514,9 @@ async function callTool(deps: Deps, auth: Auth, params: any) {
   const problem = validateArgs(tool.inputSchema, args);
   if (problem) return { result: { content: [{ type: "text", text: problem }], isError: true } };
   try {
-    const value = await tool.run({ rpc: deps.rpc, learner: auth.learner_id, now: deps.now ?? (() => new Date()) }, args);
+    const ctx: Ctx = { rpc: deps.rpc, learner: auth.learner_id, now: deps.now ?? (() => new Date()), storage: deps.storage };
+    const value = await tool.run(ctx, args);
+    if (value instanceof Content) return { result: { content: value.content } };
     return { result: { content: [{ type: "text", text: JSON.stringify(value ?? null) }] } };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -512,6 +617,26 @@ async function status(deps: Deps, auth: Auth, handler: (r: Request) => Promise<R
       next_concept: { isError: !!next.body?.result?.isError, text: text(next).slice(0, 400) },
       table_of_contents: { isError: !!toc.body?.result?.isError, text: text(toc).slice(0, 400) },
     };
+    const label = url.searchParams.get("figure");
+    if (label) {
+      // Checks Storage end to end without exposing the link: content types and sizes only.
+      const fig = await post({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "show_figure", arguments: { label } } });
+      const content: any[] = fig.body?.result?.content ?? [];
+      const meta = content.find((c) => c.type === "text")?.text ?? "";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(meta);
+      } catch {
+        parsed = { text: meta.slice(0, 300) };
+      }
+      (out.selftest as Record<string, unknown>).show_figure = {
+        isError: !!fig.body?.result?.isError,
+        content: content.map((c) => (c.type === "image" ? `image ${c.mimeType} ${Math.round((c.data?.length ?? 0) * 0.75)} bytes` : c.type)),
+        has_url: !!parsed.url,
+        caption: parsed.caption ?? null,
+        note: parsed.url ? undefined : parsed.note ?? parsed.text,
+      };
+    }
   }
   return out;
 }
@@ -597,6 +722,30 @@ export function makeRpc(baseUrl: string, key: string, fetchImpl: typeof fetch = 
       throw new Error(`${fn}: ${message}`);
     }
     return text ? JSON.parse(text) : null;
+  };
+}
+
+export function makeStorage(baseUrl: string, key: string, fetchImpl: typeof fetch = fetch): Storage {
+  const base = `${baseUrl.replace(/\/$/, "")}/storage/v1`;
+  const auth: Record<string, string> = { apikey: key };
+  if (key.startsWith("eyJ")) auth.Authorization = `Bearer ${key}`;
+  const enc = (path: string) => path.split("/").map(encodeURIComponent).join("/");
+  return {
+    async sign(bucket, path, expiresIn = LINK_SECONDS) {
+      const res = await fetchImpl(`${base}/object/sign/${bucket}/${enc(path)}`, {
+        method: "POST", headers: { ...auth, "Content-Type": "application/json" }, body: JSON.stringify({ expiresIn }),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`storage sign ${path}: ${res.status} ${text}`);
+      const body = JSON.parse(text);
+      const signed: string = body.signedURL ?? body.signedUrl;
+      return signed.startsWith("http") ? signed : `${base}${signed}`;
+    },
+    async download(bucket, path) {
+      const res = await fetchImpl(`${base}/object/${bucket}/${enc(path)}`, { headers: auth });
+      if (!res.ok) throw new Error(`storage download ${path}: ${res.status} ${await res.text()}`);
+      return new Uint8Array(await res.arrayBuffer());
+    },
   };
 }
 

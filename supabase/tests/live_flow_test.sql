@@ -74,6 +74,7 @@ begin
 
   r := koro_teach(L, '1.1/tokens', E, 'cli');
   assert r->'progress'->>'status' = 'seen', 'teach marks seen';
+  assert r->'figures' = '[]'::jsonb and (r->>'has_source_text')::boolean = false, 'teach has figure fields';
   r := koro_next_concept(L, E);
   assert r->>'reason' = 'resume' and r->'concept'->>'key' = '1.1/tokens', 'resume shown-but-unchecked concept';
 

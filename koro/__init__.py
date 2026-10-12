@@ -5,4 +5,4 @@ Code, Codex, ...) does the reading, teaching and judging; koro stores structure
 and evidence and decides what to teach next.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

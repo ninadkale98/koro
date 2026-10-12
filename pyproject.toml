@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "koro"
-version = "0.1.0"
+version = "0.2.0"
 description = "A headless teacher agent: learn books, papers and repos from any terminal, driven by the coding agent you already use."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Ninad Kale" }]
-dependencies = ["pypdf>=4.0"]
+dependencies = ["pypdf>=4.0", "pdfplumber>=0.10"]
 
 [project.scripts]
 koro = "koro.cli:main"

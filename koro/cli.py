@@ -155,11 +155,25 @@ def cmd_add(ctx: Ctx) -> None:
         result["outline"] = ctx.rpc("koro_build_outline", entity=entity, nodes=payload)
         result["nodes"] = len(nodes)
         result["teachable_nodes"] = sum(1 for n in nodes if n["teachable"])
+    if not a.no_assets:
+        # The complete book, privately: original file, section texts, figures. Re-running uploads only what's missing.
+        try:
+            result["assets"] = ingest_assets(ctx, entity, path)
+        except KoroError as exc:
+            result["assets_error"] = f"{exc} (the book is added; fix this and run `koro ingest assets`)"
     emit(ctx, result, lambda x: (
         f"{'Already in your library' if x['existed'] else 'Added'}: {x['title']} ({x['entity_id']})"
-        + (f"\nOutline: {x['nodes']} sections, {x['teachable_nodes']} teachable."
-           f"\nNext: parse it with your coding agent (`/koro:ingest` in Claude Code), or `koro ingest next`."
+        + (f"\nOutline: {x['nodes']} sections, {x['teachable_nodes']} teachable." if "nodes" in x else "")
+        + (f"\n{render.assets(x['assets'])}" if x.get("assets") else "")
+        + (f"\nNot stored: {x['assets_error']}" if x.get("assets_error") else "")
+        + ("\nNext: parse it with your coding agent (`/koro:ingest` in Claude Code), or `koro ingest next`."
            if "nodes" in x else "")))
+
+
+def _toc_nodes(ctx: Ctx, entity: str) -> list:
+    toc = ctx.rpc("koro_toc", learner=ctx.learner, entity=entity)
+    return [{"key": n["key"], "title": n["title"], "page_start": n.get("page_start"), "depth": n.get("depth", 0)}
+            for n in toc.get("nodes") or []]
 
 
 def _source_text(ctx: Ctx, entity: str, node_key: str) -> Optional[str]:
@@ -168,10 +182,7 @@ def _source_text(ctx: Ctx, entity: str, node_key: str) -> Optional[str]:
     path = ctx.args.pdf if getattr(ctx.args, "pdf", None) else config.source_for(ctx.cfg, entity)
     if not path:
         return None
-    toc = ctx.rpc("koro_toc", learner=ctx.learner, entity=entity)
-    nodes = [{"key": n["key"], "title": n["title"], "page_start": n.get("page_start"), "depth": n.get("depth", 0)}
-             for n in toc.get("nodes") or []]
-    return pdf.node_texts(path, nodes).get(node_key)
+    return pdf.node_texts(path, _toc_nodes(ctx, entity)).get(node_key)
 
 
 def cmd_ingest_next(ctx: Ctx) -> None:
@@ -253,6 +264,226 @@ def cmd_ingest_status(ctx: Ctx) -> None:
          lambda r: f"{r['entity']['title']} [{r['entity']['status']}]: "
                    + ", ".join(f"{v} {k}" for k, v in r["counts"].items())
                    + (f"\nNot parsed yet: {' '.join(r['not_parsed'][:30])}" if r["not_parsed"] else ""))
+
+
+# ---------------------------------------------------------------------------
+# Complete ingest: the original file, every section's text, every figure.
+# All of it goes to a private bucket / locked tables, from your own copy.
+# ---------------------------------------------------------------------------
+BUCKET = "koro-private"
+TEXT_BATCH_CHARS = 300_000
+
+
+def _progress(ctx: Ctx, message: str) -> None:
+    if not ctx.args.json:
+        print(message, file=sys.stderr, flush=True)
+
+
+def _local_pdf(ctx: Ctx, entity: str, required: bool = True) -> Optional[str]:
+    given = getattr(ctx.args, "pdf", None)
+    if given:
+        path = os.path.abspath(os.path.expanduser(given))
+        if not os.path.exists(path):
+            raise KoroError(f"no such file: {given}")
+        return path
+    path = config.source_for(ctx.cfg, entity)
+    if not path and required:
+        raise KoroError("koro doesn't know where this book's PDF is on this machine: pass --pdf <path>")
+    return path
+
+
+def _figure_libs():
+    try:
+        from . import figures  # noqa: F401
+        import pdfplumber  # noqa: F401
+        import pypdfium2  # noqa: F401
+    except ImportError:
+        raise KoroError("figures need pdfplumber: pip install --upgrade 'koro @ git+https://github.com/ninadkale98/koro' "
+                        "(or pip install pdfplumber)") from None
+    from . import figures
+    return figures
+
+
+def figure_cache_path(entity: str, label: str) -> Path:
+    from . import figures, pdf
+    return pdf.cache_dir() / "figures" / entity / Path(figures.figure_path(entity, label)).name
+
+
+def ingest_assets(ctx: Ctx, entity: str, path: str, force: bool = False, redetect: bool = False,
+                  dpi: int = 200) -> dict:
+    """Upload whatever is missing: the PDF, section texts, figure images. Safe to re-run."""
+    import hashlib
+
+    from . import pdf
+
+    st = ctx.rpc("koro_asset_status", entity=entity)
+    ent = st.get("entity") or {}
+    digest = pdf.sha256_file(path)
+    if ent.get("source_hash") and ent["source_hash"] != digest and not force:
+        raise KoroError(f"{path} is not the file '{ent.get('title')}' was built from (the SHA-256 differs). Use the "
+                        "original PDF, or pass --force if it is the same edition with identical pages.")
+    if ctx.cfg.sources.get(entity) != path:
+        ctx.cfg.sources[entity] = path
+        config.save(ctx.cfg)
+    out: dict = {"entity_id": entity, "title": ent.get("title")}
+
+    # 1. The original file.
+    src = st.get("source") or {}
+    if force or src.get("sha256") != digest:
+        data = Path(path).read_bytes()
+        _progress(ctx, f"Uploading the PDF ({len(data) / 1e6:.1f} MB) to your private bucket…")
+        from .figures import source_path
+        spath = source_path(entity)
+        ctx.client.upload(BUCKET, spath, data, "application/pdf")
+        ctx.rpc("koro_register_source", entity=entity, storage_path=spath, size=len(data), sha256=digest)
+        out["source"] = "uploaded"
+    else:
+        out["source"] = "already stored"
+
+    # 2. Each section's original text (for grounding answers).
+    secs = st.get("sections") or {}
+    if force or secs.get("with_text", 0) < secs.get("total", 0):
+        _progress(ctx, "Extracting section texts…")
+        texts = pdf.node_texts(path, _toc_nodes(ctx, entity))
+        saved, batch, size, unknown = 0, {}, 0, []
+
+        def flush():
+            nonlocal saved, batch, size
+            if batch:
+                r = ctx.rpc("koro_save_node_sources", entity=entity, texts=batch)
+                saved += r.get("saved", 0)
+                unknown.extend(r.get("unknown_keys") or [])
+                batch, size = {}, 0
+
+        for key, text in texts.items():
+            if not text or not text.strip():
+                continue
+            if size + len(text) > TEXT_BATCH_CHARS:
+                flush()
+            batch[key] = text
+            size += len(text)
+        flush()
+        out["sections"] = {"saved": saved, "of": secs.get("total"), "unknown_keys": unknown}
+        _progress(ctx, f"  {saved} sections saved")
+    else:
+        out["sections"] = "already stored"
+
+    # 3. Figures: detect once (or with --redetect), then render and upload the missing ones.
+    figs = st.get("figures") or []
+    if not figs or redetect:
+        figures = _figure_libs()
+        _progress(ctx, "Finding figures…")
+        found = figures.detect_figures(path)
+        _, pages, _ = pdf.read_pdf(path)
+        figures.assign_nodes(found, pages, _toc_nodes(ctx, entity))
+        for f in found:
+            f["storage_path"] = figures.figure_path(entity, f["label"])
+        if found:
+            ctx.rpc("koro_register_figures", entity=entity, figures=found)
+            figs = ctx.rpc("koro_asset_status", entity=entity).get("figures") or []
+        out["figures_detected"] = len(found)
+    todo = figs if force else [f for f in figs if not f.get("uploaded")]
+    if todo:
+        figures = _figure_libs()
+        _progress(ctx, f"Uploading {len(todo)} figure{'s' if len(todo) != 1 else ''}…")
+    for i, f in enumerate(todo, 1):
+        png, width, height = figures.render(path, f["page"], f["bbox"], dpi=dpi)
+        ctx.client.upload(f.get("bucket") or BUCKET, f["storage_path"], png, "image/png")
+        ctx.rpc("koro_mark_uploaded", asset=f["asset_id"], size=len(png), sha256=hashlib.sha256(png).hexdigest(),
+                width=width, height=height)
+        cache = figure_cache_path(entity, f["label"])
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(png)
+        except OSError:
+            pass
+        if i % 10 == 0 or i == len(todo):
+            _progress(ctx, f"  {i}/{len(todo)}")
+    out["figures"] = {"total": len(figs), "uploaded_now": len(todo)}
+    return out
+
+
+def cmd_ingest_assets(ctx: Ctx) -> None:
+    a = ctx.args
+    entity = ctx.entity()
+    r = ingest_assets(ctx, entity, _local_pdf(ctx, entity), force=a.force, redetect=a.redetect, dpi=a.dpi)
+    emit(ctx, r, render.assets)
+
+
+def _figure_bytes(ctx: Ctx, entity: str, f: dict) -> bytes:
+    """Stored image if there is one, else a fresh render from the local PDF."""
+    problem = None
+    if f.get("uploaded"):
+        try:
+            return ctx.client.download(f.get("bucket") or BUCKET, f["storage_path"])
+        except KoroError as exc:
+            problem = str(exc)
+    path = _local_pdf(ctx, entity, required=False)
+    if path and f.get("bbox"):
+        png, _, _ = _figure_libs().render(path, f["page"], f["bbox"])
+        return png
+    raise KoroError(problem or f"figure {f['label']} isn't stored yet: run `koro ingest assets --pdf <path>` once")
+
+
+def _open_file(path: Path) -> Optional[str]:
+    import subprocess
+
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        elif os.name == "nt":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return None
+    except (OSError, AttributeError) as exc:
+        return f"couldn't open a viewer ({exc}); the image is at {path}"
+
+
+def cmd_figure(ctx: Ctx) -> None:
+    a = ctx.args
+    entity = ctx.entity()
+    f = ctx.rpc("koro_figure", entity=entity, label=a.label)
+    target = figure_cache_path(entity, f["label"])
+    if a.refresh or not target.exists():
+        data = _figure_bytes(ctx, entity, f)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    result = {"label": f["label"], "caption": f.get("caption"), "page": f.get("page"),
+              "concept_key": f.get("concept_key"), "section": f.get("node_key"), "path": str(target)}
+    if a.url:
+        if not f.get("uploaded"):
+            raise KoroError(f"figure {f['label']} isn't stored yet: run `koro ingest assets --pdf <path>` once")
+        result["url"] = ctx.client.sign(f.get("bucket") or BUCKET, f["storage_path"], a.expires)
+    if a.open:
+        note = _open_file(target)
+        result["opened"] = note is None
+        if note:
+            result["note"] = note
+    emit(ctx, result, render.figure)
+
+
+def cmd_figures(ctx: Ctx) -> None:
+    entity = ctx.entity()
+    if ctx.args.ref:
+        figs = ctx.rpc("koro_figures", entity=entity, ref=ctx.args.ref)
+    else:
+        figs = ctx.rpc("koro_asset_status", entity=entity).get("figures") or []
+    emit(ctx, [{k: f.get(k) for k in ("label", "caption", "page", "concept_key", "node_key", "uploaded")} for f in figs],
+         render.figure_list)
+
+
+def cmd_read(ctx: Ctx) -> None:
+    from . import pdf
+
+    entity = ctx.entity()
+    r = ctx.rpc("koro_read_section", entity=entity, node_key=ctx.args.section)
+    if not r.get("text"):
+        path = _local_pdf(ctx, entity, required=False)
+        if path:
+            r["text"] = pdf.node_texts(path, _toc_nodes(ctx, entity)).get(ctx.args.section)
+            r["text_from"] = "local pdf"
+    emit(ctx, r, render.section)
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +634,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--type", default="book", choices=["book", "paper"])
     sp.add_argument("--canonical", help="override canonical id, e.g. isbn:978..., arxiv:2401.12345")
     sp.add_argument("--rebuild-outline", action="store_true")
+    sp.add_argument("--no-assets", action="store_true",
+                    help="don't store the PDF, section texts and figures (run `koro ingest assets` later)")
 
     ing = add("ingest", None, "parse a source into lessons (driven by your coding agent)")
     isub = ing.add_subparsers(dest="ingest_command", metavar="step")
@@ -429,6 +662,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("file")
     iadd("finalize", cmd_ingest_finalize, "resolve links, break cycles, mark the source ready")
     iadd("status", cmd_ingest_status, "show parsing progress")
+    s = iadd("assets", cmd_ingest_assets,
+             "store the complete source privately: the PDF, every section's text, every figure (only what's missing)")
+    s.add_argument("--pdf", help="path to the source PDF on this machine (remembered afterwards)")
+    s.add_argument("--force", action="store_true", help="re-upload everything, and accept a PDF with a different hash")
+    s.add_argument("--redetect", action="store_true", help="find figures again (keeps existing lesson links)")
+    s.add_argument("--dpi", type=int, default=200, help="figure resolution (default 200)")
 
     add("continue", cmd_continue, "pick up whatever you were last reading")
     sp = add("start", cmd_start, "start or resume a book, optionally at a section")
@@ -437,6 +676,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--node", help="limit to a section")
     sp = add("teach", cmd_teach, "show a concept's lesson and mark it seen")
     sp.add_argument("concept", help="concept key, e.g. 5.3.1/prefix-caching")
+    sp = add("figure", cmd_figure, "get one of the book's figures as an image (and open it)")
+    sp.add_argument("label", help="figure label, e.g. 2.13")
+    sp.add_argument("--open", action="store_true", help="open it in your image viewer")
+    sp.add_argument("--url", action="store_true", help="also print a temporary link")
+    sp.add_argument("--expires", type=int, default=3600, help="link lifetime in seconds (default 3600)")
+    sp.add_argument("--refresh", action="store_true", help="fetch again instead of using the local copy")
+    sp.add_argument("--pdf", help="render from this PDF if the image isn't stored")
+    sp = add("figures", cmd_figures, "list figures for a concept or section (default: the whole book)")
+    sp.add_argument("ref", nargs="?", help="concept key or section key")
+    sp = add("read", cmd_read, "the original text of a section (private to you)")
+    sp.add_argument("section", help="section key, e.g. 2.4.1")
+    sp.add_argument("--pdf", help="read from this PDF if the text isn't stored")
     sp = add("assess", cmd_assess, "record a judged answer (evidence) for a concept")
     sp.add_argument("concept")
     sp.add_argument("--verdict", required=True, choices=["correct", "partial", "wrong"])
