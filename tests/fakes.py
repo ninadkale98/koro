@@ -64,6 +64,10 @@ RESPONSES = {
     "koro_release_node": {"node_key": "1.1", "status": "pending"},
     "koro_add_edge_refs": {"added": 2, "skipped": []},
     "koro_finalize_ingest": {"status": "ready"},
+    "koro_create_connector_token": {"token_id": "t1", "token": "koro_" + "c" * 48, "label": "claude.ai"},
+    "koro_list_connector_tokens": [{"token_id": "t1", "label": "claude.ai", "created_at": "2026-10-12T17:00:00Z",
+                                    "last_used_at": None, "revoked_at": None}],
+    "koro_revoke_connector_token": {"token_id": "t1", "revoked": True},
 }
 
 

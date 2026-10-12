@@ -345,6 +345,35 @@ def cmd_time(ctx: Ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Claude connector (remote MCP server on Supabase Edge Functions)
+# ---------------------------------------------------------------------------
+def connector_url(cfg: config.Config, token: str) -> str:
+    return f"{cfg.supabase_url.rstrip('/')}/functions/v1/koro-mcp/{token}"
+
+
+def cmd_connector_new(ctx: Ctx) -> None:
+    r = ctx.rpc("koro_create_connector_token", learner=ctx.learner, label=ctx.args.label)
+    result = {"url": connector_url(ctx.cfg, r["token"]), "token_id": r["token_id"], "label": ctx.args.label}
+    emit(ctx, result, lambda x: (
+        f"Connector URL ({x['label']}):\n\n  {x['url']}\n\n"
+        "Add it in Claude: Settings > Connectors > Add custom connector, paste the URL, no OAuth.\n"
+        "Treat the URL like a password; it is shown only once. Revoke with "
+        f"`koro connector revoke {x['token_id']}`."))
+
+
+def cmd_connector_list(ctx: Ctx) -> None:
+    emit(ctx, ctx.rpc("koro_list_connector_tokens", learner=ctx.learner), lambda rows: "\n".join(
+        f"{t['token_id']}  {t['label']:<12} created {t['created_at'][:10]}"
+        f"  last used {(t.get('last_used_at') or 'never')[:16]}"
+        + ("  REVOKED" if t.get("revoked_at") else "") for t in rows) or "No connector URLs yet: `koro connector new`.")
+
+
+def cmd_connector_revoke(ctx: Ctx) -> None:
+    emit(ctx, ctx.rpc("koro_revoke_connector_token", learner=ctx.learner, token_id=ctx.args.token_id),
+         lambda r: f"Revoked {r['token_id']}. Claude can no longer use that URL.")
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -439,6 +468,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("text")
     sp = add("time", cmd_time, "study time over the last N days")
     sp.add_argument("--days", type=int, default=7)
+
+    con = add("connector", None, "manage the Claude connector URL (learn through claude.ai)")
+    csub = con.add_subparsers(dest="connector_command", metavar="action")
+    s = csub.add_parser("new", help="create a connector URL", parents=[common])
+    s.add_argument("--label", default="claude.ai")
+    s.set_defaults(fn=cmd_connector_new)
+    s = csub.add_parser("list", help="list connector URLs (tokens are never shown again)", parents=[common])
+    s.set_defaults(fn=cmd_connector_list)
+    s = csub.add_parser("revoke", help="revoke a connector URL", parents=[common])
+    s.add_argument("token_id")
+    s.set_defaults(fn=cmd_connector_revoke)
     return p
 
 
@@ -446,8 +486,8 @@ def main(argv: Optional[list] = None, client: Optional[Client] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "fn", None):
-        if args.command == "ingest":
-            parser.parse_args(["ingest", "--help"])
+        if args.command in ("ingest", "connector"):
+            parser.parse_args([args.command, "--help"])
         parser.print_help()
         return 2
     if not hasattr(args, "json"):

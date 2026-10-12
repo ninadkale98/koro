@@ -50,6 +50,30 @@ Your learner profile ("Ninad") exists. Nothing else is needed on the database si
 If `koro continue` fails with 401/403, the key is wrong or is the publishable key. If it fails
 with 404, the schema isn't on that project.
 
+## Learn by chatting with Claude (claude.ai connector)
+
+Koro is also a remote MCP server, deployed as the Supabase Edge Function `koro-mcp`, so you
+can learn in any Claude chat on claude.ai or Claude Desktop, with the same progress as the terminal.
+
+1. Get your private connector URL: `koro connector new` (it is shown once; treat it like a password).
+2. In Claude: **Settings → Connectors → Add custom connector**, give it a name ("Koro"),
+   paste the URL, leave OAuth empty, and save. Custom connectors need a Pro, Max, Team or
+   Enterprise plan.
+3. In a chat, enable Koro from the tools menu and say "let's continue my book", or pick the
+   *Continue learning* prompt from the connector's prompts.
+
+Claude then teaches beat by beat, asks the checks, and records every answer, exactly like
+`/koro:continue`. Tools: `continue_learning`, `start_book`, `next_concept`, `get_lesson`,
+`record_answer`, `dispute_verdict`, `mark_known`, `table_of_contents`, `progress_report`,
+`search_book`, `list_library`, `set_book_status`, `restart_book`, `set_goal`,
+`save_learner_summary`, `study_time`. Prompts: *Continue learning*, *Study a section*,
+*Quiz me*, *How am I doing?*
+
+Manage URLs with `koro connector list` and `koro connector revoke <id>`. Only a SHA-256 hash
+of each token is stored. Opening the URL in a browser shows a small status page.
+Redeploying: `supabase functions deploy koro-mcp --no-verify-jwt` (the function checks the
+token itself, so the platform JWT check must be off).
+
 ## Daily use
 
 In Claude Code: `/koro:continue`, or just say "let's continue my book". The agent teaches a
@@ -75,6 +99,7 @@ From a plain terminal:
 | `koro time --days 7` | study time vs goals |
 | `koro restart --yes` | start a book over (history kept) |
 | `koro library` | everything you've added |
+| `koro connector new` / `list` / `revoke <id>` | manage the claude.ai connector URL |
 
 Add `--json` to any command for machine-readable output (agents always use it). With several
 books, commands use the most recent one unless you pass `-e "<title or id>"`.
@@ -137,11 +162,13 @@ koro/                    Python CLI (stdlib + pypdf)
 plugin/                  Claude Code plugin (skills: learn, continue, start, status, add, ingest)
 .claude-plugin/          marketplace manifest
 supabase/migrations/     schema + functions (applied to the koro project)
+supabase/functions/koro-mcp/  the claude.ai connector (remote MCP server, Deno, no deps)
 supabase/tests/          live end-to-end test that rolls itself back
 docs/node-payload.md     the lesson payload format
 AGENTS.md                instructions for Codex and other agents (generated)
 tools/sync_docs.py       regenerates the plugin skill / AGENTS.md copies
 tests/                   unit tests: python -m unittest discover -s tests -t .
+                         connector: node --experimental-strip-types --test supabase/functions/koro-mcp/mcp.test.ts
 ```
 
 ## Setting up a fresh Supabase project
@@ -151,5 +178,5 @@ Apply `supabase/migrations/*.sql` in filename order (`supabase link --project-re
 
 ## Not built yet
 
-The exercise runner (Fly.io containers), the claude.ai connector, cross-book topic linking,
+The exercise runner (Fly.io containers), OAuth for the connector, cross-book topic linking,
 publishing to PyPI, and multi-user sharing. The schema already has room for all of them.

@@ -190,6 +190,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(out.getvalue())["error"], "koro_continue: permission denied")
 
+    def test_connector_commands(self):
+        code, out, _, rec = self.run_cli("connector", "new", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(rec.last("koro_create_connector_token"), {"p_learner": L, "p_label": "claude.ai"})
+        self.assertEqual(json.loads(out)["url"],
+                         "https://example.supabase.co/functions/v1/koro-mcp/koro_" + "c" * 48)
+        code, out, _, _ = self.run_cli("connector", "new")
+        self.assertIn("Settings > Connectors", out)
+        code, out, _, rec = self.run_cli("connector", "list")
+        self.assertIn("never", out)
+        code, out, _, rec = self.run_cli("connector", "revoke", "t1")
+        self.assertEqual(rec.last("koro_revoke_connector_token"), {"p_learner": L, "p_token_id": "t1"})
+
     def test_install_skill(self):
         target = os.path.join(self.tmp.name, "skills", "koro")
         code, out, _, _ = self.run_cli("install-skill", "--dir", target)
