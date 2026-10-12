@@ -20,7 +20,7 @@ export type Deps = {
   now?: () => Date;
 };
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 const LINK_SECONDS = 3600; // signed figure links last an hour; show_figure makes a fresh one
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -37,6 +37,8 @@ Session loop
 4. Check every objective: ask the lesson's checks one at a time and wait for the answer. Judge it against answer_guide as correct, partial or wrong, honestly (never round up). Call record_answer right away with the question, their answer condensed, your feedback, and a misconception when a specific wrong belief showed. Give a sentence or two of feedback. After partial or wrong, re-explain from a different angle and ask a fresh variant; record that too.
 5. For modality code or exercise, offer the exercise, judge it against solution_sketch, record with kind exercise.
 6. next_concept and repeat. Every few concepts and at the end of the session, call save_learner_summary with 2-3 sentences on where they stand.
+
+Saving for later: while the learner is working or chatting, they may want to keep something to learn properly later ("save this to koro", "I want to learn X later", a link or paper). Call save_for_later right away with a clear title, the URL if there is one, a one-line note on why it came up, and 1-3 short tags; confirm in one line with its number (#12) and carry on. "What did I save?" -> list_saved, then summarize by theme instead of reading the list out. Move items along with update_saved (planned, learning, done, archived). Save ideas and public links, not proprietary code or internal documents.
 
 When the learner says: "I already know this" -> mark_known, then offer a one-question confirm. "My answer was right" -> dispute_verdict (assessment_id comes from record_answer). "Jump to 5.3" -> start_book(section "5.3"). "Where is X covered?" -> search_book. "How am I doing?" -> progress_report. Pause, finish or drop a book -> set_book_status. Start over -> confirm first, then restart_book(confirm true). Goals -> set_goal. Time studied -> study_time.
 In voice or on mobile keep beats even shorter and ask one question at a time.`;
@@ -69,6 +71,10 @@ type Tool = {
   annotations?: Record<string, boolean | string>;
   run: (ctx: Ctx, args: Record<string, any>) => Promise<unknown>;
 };
+
+const URL_RE = /^https?:\/\/\S+$/i;
+const TAGS = { type: "array", items: { type: "string" }, description: "1-3 short topic tags, e.g. [\"gpu\", \"kv-cache\"]." };
+const SAVED_STATUS = ["inbox", "planned", "learning", "done", "archived"];
 
 const BOOK = { type: "string", description: "Book, paper or repo: title (or part of it) or id. Defaults to the most recent one." };
 const SECTION = { type: "string", description: "Section key from the table of contents, e.g. \"5.3\" or \"2.4.1\"." };
@@ -418,6 +424,94 @@ export const TOOLS: Tool[] = [
       return ctx.rpc("koro_study_time", { p_learner: ctx.learner, p_since: since });
     },
   },
+  {
+    name: "save_for_later",
+    title: "Save something to learn later",
+    description: "Save a topic, question, link or paper the learner wants to learn properly later (\"save this to koro\", \"I want to learn X later\"). Give a clear title, the URL if there is one, a one-line note on why it came up, and 1-3 tags. Saving the same link again updates the existing item. Returns the item with its number (#12).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        what: { type: "string", description: "The topic, question or URL to save." },
+        title: { type: "string", description: "Short title. For a link, the page or paper title." },
+        note: { type: "string", description: "Why it caught their eye, what they were doing." },
+        tags: TAGS,
+        kind: { type: "string", enum: ["topic", "question", "note", "url", "pdf"], description: "Usually inferred." },
+      },
+      required: ["what"],
+      additionalProperties: false,
+    },
+    run: (ctx, a) => {
+      const what = String(a.what).trim();
+      const isUrl = URL_RE.test(what);
+      const kind = a.kind ?? (isUrl ? (/\.pdf([?#]|$)/i.test(what) ? "pdf" : "url") : undefined);
+      // A titled topic keeps its full wording in the note.
+      const extra = !isUrl && a.title && a.title.trim() !== what ? what : undefined;
+      return ctx.rpc("koro_save_item", {
+        p_learner: ctx.learner, p_title: a.title ?? (isUrl ? undefined : what), p_kind: kind,
+        p_body: [extra, a.note].filter(Boolean).join("\n\n") || undefined, p_url: isUrl ? what : undefined,
+        p_tags: a.tags ?? [], p_context: {}, p_client: CLIENT,
+      });
+    },
+  },
+  {
+    name: "list_saved",
+    title: "Things saved to learn",
+    description: "What the learner saved to learn later: topics, questions, links, papers, with notes, tags and status (inbox, planned, learning, done, archived). Defaults to open items; filter by status, tag or search words.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["open", "all", ...SAVED_STATUS], description: "Default open (inbox, planned, learning)." },
+        tag: { type: "string" },
+        search: { type: "string", description: "Words to find in titles, notes, links and tags." },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Default 50." },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    run: async (ctx, a) => {
+      const r = await ctx.rpc("koro_saved_items", {
+        p_learner: ctx.learner, p_status: a.status ?? "open", p_tag: a.tag, p_query: a.search, p_limit: a.limit ?? 50,
+      });
+      const items = await Promise.all((r?.items ?? []).map(async (s: any) => {
+        let file_link: string | null = null;
+        if (s.file?.storage_path && ctx.storage) {
+          try {
+            file_link = await ctx.storage.sign(s.file.bucket ?? "koro-private", s.file.storage_path, LINK_SECONDS);
+          } catch {
+            file_link = null;
+          }
+        }
+        return {
+          no: s.no, title: s.title, kind: s.kind, status: s.status, tags: s.tags ?? [], note: s.body ?? null,
+          url: s.url ?? null, file: s.file?.filename ?? null, file_link, saved: s.created_at,
+          from: s.context?.client ?? null,
+        };
+      }));
+      return { items, counts: r?.counts ?? {}, tags: r?.tags ?? [] };
+    },
+  },
+  {
+    name: "update_saved",
+    title: "Update a saved item",
+    description: "Move a saved item along (planned, learning, done, archived, or back to inbox), retitle it, add a note, or change its tags.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        item: { type: "integer", minimum: 1, description: "The item number, e.g. 12 for #12." },
+        status: { type: "string", enum: SAVED_STATUS },
+        title: { type: "string" },
+        note: { type: "string", description: "Appended to the item's notes." },
+        add_tags: TAGS,
+        remove_tags: { type: "array", items: { type: "string" } },
+      },
+      required: ["item"],
+      additionalProperties: false,
+    },
+    run: (ctx, a) => ctx.rpc("koro_update_saved_item", {
+      p_learner: ctx.learner, p_ref: String(a.item), p_status: a.status, p_title: a.title, p_note: a.note,
+      p_add_tags: a.add_tags, p_remove_tags: a.remove_tags,
+    }),
+  },
 ];
 
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
@@ -436,6 +530,10 @@ export function validateArgs(schema: Schema, args: Record<string, any>): string 
     if (spec.type === "string" && typeof value !== "string") return `${key} must be a string`;
     if (spec.type === "boolean" && typeof value !== "boolean") return `${key} must be true or false`;
     if (spec.type === "integer" && !Number.isInteger(value)) return `${key} must be an integer`;
+    if (spec.type === "array") {
+      if (!Array.isArray(value)) return `${key} must be a list`;
+      if (spec.items?.type === "string" && value.some((v: unknown) => typeof v !== "string")) return `${key} must be a list of strings`;
+    }
     if (spec.enum && !spec.enum.includes(value)) return `${key} must be one of: ${spec.enum.join(", ")}`;
     if (typeof spec.minimum === "number" && value < spec.minimum) return `${key} must be at least ${spec.minimum}`;
     if (typeof spec.maximum === "number" && value > spec.maximum) return `${key} must be at most ${spec.maximum}`;
@@ -471,6 +569,12 @@ export const PROMPTS: Prompt[] = [
     description: "Review gaps and fading concepts with questions.",
     arguments: [{ name: "topic", description: "Optional topic or section to focus on" }],
     text: (a) => `Quiz me with koro${a.topic ? ` on ${a.topic}` : ""}: use progress_report to find my open gaps and fading concepts (search_book for a topic), get each lesson, ask its checks one at a time, and record every answer with record_answer.`,
+  },
+  {
+    name: "saved",
+    title: "What did I save?",
+    description: "Things you saved to learn later, grouped by theme.",
+    text: () => "What have I saved in koro to learn later? Call list_saved and summarize it by theme: what's there, what's been waiting longest, and which two or three you'd suggest next and why.",
   },
   {
     name: "progress",

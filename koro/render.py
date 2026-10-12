@@ -180,6 +180,72 @@ def assets(r: dict) -> str:
     return "\n".join(out)
 
 
+STATUS_MARK = {"inbox": "○", "planned": "◇", "learning": "◐", "done": "✓", "archived": "–"}
+
+
+def _ago(stamp: str) -> str:
+    from datetime import datetime, timezone
+
+    try:
+        t = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    days = (datetime.now(timezone.utc) - t).days
+    return "today" if days < 1 else "yesterday" if days == 1 else f"{days}d ago" if days < 60 else t.strftime("%Y-%m-%d")
+
+
+def saved_line(s: dict) -> str:
+    tags = " ".join("#" + t for t in s.get("tags") or [])
+    extra = s.get("url") or ((s.get("file") or {}).get("filename"))
+    head = f"{STATUS_MARK.get(s.get('status'), ' ')} #{s['no']:<4} {s['title']}"
+    tail = "  ".join(x for x in (f"[{s.get('kind')}]", tags, _ago(s.get("created_at", ""))) if x)
+    out = [head, f"        {tail}"]
+    if extra and extra != s["title"]:
+        out.append(f"        {extra}")
+    return "\n".join(out)
+
+
+def saved_saved(s: dict) -> str:
+    verb = "Already saved, updated" if s.get("existed") else "Saved"
+    return f"{verb} #{s['no']}: {s['title']}" + (f"  ({' '.join('#' + t for t in s['tags'])})" if s.get("tags") else "") \
+        + "\nSee everything with `koro saved`."
+
+
+def saved_list(r: dict) -> str:
+    items = r.get("items") or []
+    c = r.get("counts") or {}
+    f = r.get("filter") or {}
+    head = (f"Saved to learn: {c.get('inbox', 0)} inbox, {c.get('planned', 0)} planned, "
+            f"{c.get('learning', 0)} learning, {c.get('done', 0)} done")
+    if not items:
+        return head + "\n\nNothing here" + (" for that filter." if f.get("tag") or f.get("query") else
+                                            ". Save something with: koro save \"<topic, link or file>\" --note \"why\"")
+    out = [head, ""] + [saved_line(s) for s in items]
+    tags = r.get("tags") or []
+    if tags and not f.get("tag"):
+        out += ["", "Tags: " + "  ".join(f"#{t['tag']} ({t['n']})" for t in tags[:12])]
+    out.append("\n○ inbox  ◇ planned  ◐ learning  ✓ done   ·  koro saved <n> to see one, koro saved done <n>")
+    return "\n".join(out)
+
+
+def saved_item(s: dict) -> str:
+    out = [saved_line(s)]
+    if s.get("body"):
+        out += ["", _wrap(s["body"])]
+    ctx = {k: v for k, v in (s.get("context") or {}).items() if v}
+    if ctx:
+        out += ["", "  from: " + ", ".join(f"{k} {v}" for k, v in ctx.items())]
+    if s.get("path"):
+        out.append(f"  file: {s['path']}")
+    if s.get("note"):
+        out.append(f"  {s['note']}")
+    return "\n".join(out)
+
+
+def saved_items(r) -> str:
+    return "\n\n".join(saved_item(s) for s in (r if isinstance(r, list) else [r]))
+
+
 def assessed(r: dict) -> str:
     out = [f"{r.get('concept_key')}: {r.get('status')} (mastery {r.get('mastery')}, holds ~{r.get('stability_days')} days)"]
     for o in r.get("objectives") or []:

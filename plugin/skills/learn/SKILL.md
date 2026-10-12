@@ -1,7 +1,7 @@
 ---
 name: learn
-description: Teach the user a book, paper or repo with koro, their headless teacher agent. Use when the user says /koro, wants to learn/study/continue/resume a book, asks what they were reading, wants a lesson, quiz or progress report, or wants to add or parse a new source for learning.
-argument-hint: "[continue | start <book> [section] | status | toc | search <topic> | add <file.pdf> | ingest]"
+description: Teach the user a book, paper or repo with koro, their headless teacher agent. Use when the user says /koro, wants to learn/study/continue/resume a book, asks what they were reading, wants a lesson, quiz or progress report, wants to add or parse a new source for learning, or wants to save something to learn later ("save this to koro", "remind me to learn X") or see what they saved.
+argument-hint: "[continue | start <book> [section] | status | toc | search <topic> | save <thing> | saved | add <file.pdf> | ingest]"
 allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 
@@ -18,6 +18,8 @@ Arguments: $ARGUMENTS
 - empty, `continue`, `resume` → `koro continue --json`
 - `start <book> [section]` → `koro start [section] -e "<book>" --json`
 - `status` → `koro status --json` · `toc` → `koro toc --json` · `search <topic>` → `koro search "<topic>" --json`
+- `save <thing>`, "save this to koro", "I want to learn X later" → see "Saving things to learn later"
+- `saved`, "what did I save?" → `koro saved --json`
 - `add <file>` → see "Adding a source" · `ingest` → see "Parsing a source"
 - anything else ("teach me attention", "quiz me on chapter 3"): find it with `koro search`, then teach it.
 
@@ -83,8 +85,35 @@ If `koro` is missing, install it: `pip install koro-learn` (the command is `koro
 | "Start over" | confirm first, then `koro restart --yes` (history is kept) |
 | "I want to finish by Dec 1, 20 min a day" | `koro goal --by 2026-12-01 --daily 20` |
 | "How much did I study?" | `koro time --days 7 --json` |
+| "Save this / I want to learn X later" | `koro save "<X>" --note "<why>" --tag <t> --json` (see below) |
+| "What did I save?" / "anything saved about GPUs?" | `koro saved --json` (`--tag gpu`, `--search "..."`, `--all`) |
 
 Several books: commands default to the most recent one; pass `-e "<title or id>"` otherwise.
+
+## Saving things to learn later
+
+While working, the learner may hit something they want to learn properly later: a topic, a
+question, a link, a paper, a snippet. Save it right away, confirm in one line with its number,
+and get back to what they were doing:
+
+```
+koro save "<topic, question, URL or file path>" --title "<short title>" \
+  --note "<one line: why it came up, what they were doing>" --tag <topic> --json
+```
+
+- A URL is saved as a link (koro looks up the page title; pass `--title` if you know a better
+  one). A file path, such as a PDF, is uploaded to their private storage so it's there on every
+  machine. `koro save - --title "..."` reads a snippet from stdin.
+- Write the note in plain words from the conversation: what they were doing and what puzzled
+  them. Add 1-3 short tags. Only add `--here` (records repo, branch and folder) if they want it.
+- Koro is a personal database: save the idea, a public link or a short description, never
+  proprietary code or internal documents from their job.
+- Items are numbered (`#12`) and move inbox → planned → learning → done (or archived):
+  `koro saved 12` shows one, `koro saved done 12`, `koro saved planned 12 13`,
+  `koro saved edit 12 --note "..." --tag x --untag y`, `koro saved open 12` opens the link or file.
+- "What did I save?": `koro saved --json`, then summarize by theme rather than reading the list
+  out. If they ask what to learn next from it, suggest an order with a reason for each and mark
+  the ones they pick `planned`. (Building a full curriculum from saved items comes later.)
 
 ## Adding a source
 
@@ -124,5 +153,6 @@ for the koro project is connected, call the same functions with SQL, e.g.
 `select koro_assess(p_learner => '<learner>', p_concept_ref => '<key>', p_verdict => 'partial', p_objective_key => '<obj>', p_answer => '...', p_feedback => '...');`.
 Function names and parameters match the CLI (`koro_next_concept`, `koro_status`,
 `koro_toc`, `koro_search`, `koro_mark_known`, `koro_dispute`, `koro_set_summary`,
-`koro_figure`, `koro_figures`, `koro_read_section`, ...). Figure images live in the private
+`koro_figure`, `koro_figures`, `koro_read_section`, `koro_save_item`, `koro_saved_items`,
+`koro_update_saved_item`, ...). Figure images live in the private
 Storage bucket `koro-private`, so without the CLI describe figures from their captions.

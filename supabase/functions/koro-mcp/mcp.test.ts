@@ -35,6 +35,9 @@ const SIGNATURES: Record<string, string[]> = {
   koro_check_connector_token: ["p_token"],
   koro_figure: ["p_entity", "p_label"],
   koro_read_section: ["p_entity", "p_node_key"],
+  koro_save_item: ["p_learner", "p_title", "p_kind", "p_body", "p_url", "p_tags", "p_context", "p_client"],
+  koro_saved_items: ["p_learner", "p_status", "p_tag", "p_query", "p_limit"],
+  koro_update_saved_item: ["p_learner", "p_ref", "p_status", "p_title", "p_note", "p_add_tags", "p_remove_tags", "p_entity"],
 };
 
 const FIG = { asset_id: "f1", label: "2.13", caption: "A roofline chart.", page: 65, bbox: [1, 2, 3, 4],
@@ -89,6 +92,17 @@ const CANNED: Record<string, unknown> = {
   koro_set_goal: { daily_minutes: 20 },
   koro_set_summary: { knowledge_summary: "x" },
   koro_study_time: [{ minutes: 30 }],
+  koro_save_item: { no: 12, title: "PagedAttention", status: "inbox", existed: false },
+  koro_saved_items: {
+    items: [{ no: 12, id: "s12", kind: "url", title: "PagedAttention", url: "https://arxiv.org/abs/2309.06180",
+              tags: ["papers"], status: "inbox", body: "block tables", context: { client: "cli", device: "lab" },
+              created_at: "2026-10-12T18:00:00Z" },
+            { no: 13, id: "s13", kind: "pdf", title: "flash.pdf", tags: [], status: "planned", context: {},
+              file: { filename: "flash.pdf", bucket: "koro-private", storage_path: "saved/L/13-flash.pdf" },
+              created_at: "2026-10-12T18:00:00Z" }],
+    counts: { inbox: 1, planned: 1, learning: 0, done: 0, archived: 0 }, tags: [{ tag: "papers", n: 1 }],
+  },
+  koro_update_saved_item: { no: 12, status: "done" },
 };
 
 function setup(overrides: Record<string, unknown> = {}, storage?: Storage) {
@@ -98,7 +112,8 @@ function setup(overrides: Record<string, unknown> = {}, storage?: Storage) {
     const sig = SIGNATURES[fn];
     assert.ok(sig, `unexpected rpc ${fn}`);
     for (const k of Object.keys(params)) assert.ok(sig.includes(k), `${fn} has no parameter ${k}`);
-    calls.push([fn, params]);
+    // makeRpc drops undefined (and null) before sending; record what would be sent, keeping nulls visible
+    calls.push([fn, Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined))]);
     const r = responses[fn];
     if (r instanceof Error) throw r;
     return r;
@@ -455,4 +470,50 @@ test("makeStorage: sign and download against the Storage API", async () => {
 test("toBase64 matches Buffer for large inputs", () => {
   const big = new Uint8Array(100_000).map((_, i) => (i * 31) % 256);
   assert.equal(toBase64(big), Buffer.from(big).toString("base64"));
+});
+
+test("save_for_later: links, titled topics and tags", async () => {
+  const { call, last } = setup();
+  const p = payload(await call("save_for_later", { what: "https://arxiv.org/abs/2309.06180", title: "PagedAttention",
+    note: "came up while reading 5.3", tags: ["papers", "kv-cache"] }));
+  assert.equal(p.no, 12);
+  assert.deepEqual(last("koro_save_item"), { p_learner: L, p_title: "PagedAttention", p_kind: "url",
+    p_body: "came up while reading 5.3", p_url: "https://arxiv.org/abs/2309.06180", p_tags: ["papers", "kv-cache"],
+    p_context: {}, p_client: "connector" });
+  await call("save_for_later", { what: "https://x.io/flash.pdf" });
+  assert.equal(last("koro_save_item").p_kind, "pdf");
+  assert.equal(last("koro_save_item").p_title, undefined);
+  await call("save_for_later", { what: "how does the scheduler decide what to preempt?", title: "Preemption" });
+  const t = last("koro_save_item");
+  assert.equal(t.p_title, "Preemption");
+  assert.equal(t.p_body, "how does the scheduler decide what to preempt?");
+  assert.equal(t.p_url, undefined);
+  const bad = await call("save_for_later", { what: "x", tags: "gpu" });
+  assert.match(bad.result.content[0].text, /tags must be a list/);
+  const bad2 = await call("save_for_later", { what: "x", tags: [1] });
+  assert.match(bad2.result.content[0].text, /list of strings/);
+});
+
+test("list_saved: compact items, file links, filters", async () => {
+  const { call, last } = setup({}, fakeStorage());
+  const p = payload(await call("list_saved", { tag: "papers" }));
+  assert.deepEqual(last("koro_saved_items"), { p_learner: L, p_status: "open", p_tag: "papers", p_limit: 50 });
+  assert.equal(p.items.length, 2);
+  assert.equal(p.items[0].note, "block tables");
+  assert.equal(p.items[0].from, "cli");
+  assert.equal(p.items[0].file_link, null);
+  assert.equal(p.items[1].file, "flash.pdf");
+  assert.match(p.items[1].file_link, /koro-private\/saved\/L\/13-flash\.pdf\?token=t/);
+  assert.equal(JSON.stringify(p).includes("storage_path"), false);
+  await call("list_saved", { status: "all", search: "attention", limit: 10 });
+  assert.deepEqual(last("koro_saved_items"), { p_learner: L, p_status: "all", p_query: "attention", p_limit: 10 });
+});
+
+test("update_saved moves an item along", async () => {
+  const { call, last } = setup();
+  await call("update_saved", { item: 12, status: "done", note: "finished", add_tags: ["read"] });
+  assert.deepEqual(last("koro_update_saved_item"), { p_learner: L, p_ref: "12", p_status: "done", p_note: "finished",
+    p_add_tags: ["read"] });
+  const bad = await call("update_saved", { item: "twelve" });
+  assert.match(bad.result.content[0].text, /item must be an integer/);
 });

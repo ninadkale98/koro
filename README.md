@@ -75,17 +75,41 @@ Claude then teaches beat by beat, asks the checks, and records every answer, exa
 `/koro:continue`. When a beat has a figure, Claude calls `show_figure`: it sees the book's
 image, walks you through it, and gives you a link to open it (links last an hour). When you
 ask what the book says exactly, it calls `read_section` and answers from the original text.
+Say "save this to koro" in any chat and Claude calls `save_for_later` (see below).
 Tools: `continue_learning`, `start_book`, `next_concept`, `get_lesson`, `show_figure`,
 `read_section`, `record_answer`, `dispute_verdict`, `mark_known`, `table_of_contents`,
 `progress_report`, `search_book`, `list_library`, `set_book_status`, `restart_book`,
-`set_goal`, `save_learner_summary`, `study_time`. Prompts: *Continue learning*, *Study a
-section*, *Quiz me*, *How am I doing?*
+`set_goal`, `save_learner_summary`, `study_time`, `save_for_later`, `list_saved`,
+`update_saved`. Prompts: *Continue learning*, *Study a section*, *Quiz me*, *What did I
+save?*, *How am I doing?*
 
 Manage URLs with `koro connector list` and `koro connector revoke <id>`. Only a SHA-256 hash
 of each token is stored. Opening the URL in a browser shows a small status page; add
 `?selftest=1&figure=2.13` to check the tools and figure storage end to end.
 Redeploying: `supabase functions deploy koro-mcp --no-verify-jwt` (the function checks the
 token itself, so the platform JWT check must be off).
+
+## Save things to learn later
+
+Hit something intriguing while working? Save it in one line and keep going. It's there on
+every machine and in every Claude chat.
+
+```bash
+koro save "paged attention vs continuous batching" -n "saw it in the vLLM scheduler" -t gpu
+koro save https://arxiv.org/abs/2309.06180 -t papers        # the page title is looked up
+koro save ~/Downloads/flash-attention.pdf -n "the tiling trick"   # uploaded to your private storage
+pbpaste | koro save - --title "lock-free queue trick"      # a snippet from stdin
+koro save "why is decode memory-bound?" --here               # also records repo, branch, folder
+```
+
+Then `koro saved` lists what's open (newest first, with tags), `koro saved 12` shows one,
+`koro saved open 12` opens its link or file, and items move along with `koro saved planned 12`,
+`learning`, `done`, `archived` or `reopen`. Filter with `--tag gpu`, `--search "kv"`, `--all`.
+In Claude Code, say "save this to koro" (or `/koro:save ...`) and the agent writes the note for
+you; "what did I save?" (or `/koro:saved`) gets a summary by theme. In a Claude chat with the
+connector, the same phrases work. Saving the same link twice updates one item.
+
+Coming next: turning saved items into a curriculum and teaching it.
 
 ## Daily use
 
@@ -117,6 +141,8 @@ From a plain terminal:
 | `koro library` | everything you've added |
 | `koro connector new` / `list` / `revoke <id>` | manage the claude.ai connector URL |
 | `koro ingest assets --pdf <file>` | store the complete source privately (PDF, section texts, figures) |
+| `koro save "<topic, link or file>" -n "why"` | save something to learn later (`-t` tags, `--here` for repo/branch) |
+| `koro saved` / `saved 12` / `saved done 12` | what you saved; show one; move it along |
 
 Add `--json` to any command for machine-readable output (agents always use it). With several
 books, commands use the most recent one unless you pass `-e "<title or id>"`.
@@ -204,8 +230,8 @@ Apply `supabase/migrations/*.sql` in filename order (`supabase link --project-re
 
 ## Not built yet
 
-The exercise runner (Fly.io containers), OAuth for the connector, cross-book topic linking,
-and multi-user sharing. The schema already has room for all of them.
+A curriculum built from saved items, the exercise runner (Fly.io containers), OAuth for the
+connector, cross-book topic linking, and multi-user sharing. The schema already has room for all of them.
 
 ## Releasing
 

@@ -1,6 +1,6 @@
 {
   "name": "koro",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Koro, a headless teacher agent: learn books, papers and repos from any terminal. Teaches one concept at a time, checks you, and remembers your strengths and gaps across machines.",
   "author": { "name": "Ninad Kale" },
   "homepage": "https://github.com/ninadkale98/koro",

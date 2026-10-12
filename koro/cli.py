@@ -604,6 +604,161 @@ def cmd_connector_revoke(ctx: Ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Saved items: things to learn later, captured mid-work
+# ---------------------------------------------------------------------------
+URL = re.compile(r"^https?://\S+$", re.I)
+MAX_SAVED_FILE = 50 * 1024 * 1024
+SAVED_STATUSES = ("inbox", "planned", "learning", "done", "archived")
+
+
+def _tags(values: Optional[list]) -> list:
+    out: list = []
+    for v in values or []:
+        out += [t.strip() for t in v.split(",") if t.strip()]
+    return out
+
+
+def page_title(url: str, timeout: float = 4.0) -> Optional[str]:
+    """Best-effort <title> of a web page (None if it can't be fetched quickly)."""
+    import html
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "koro (+https://github.com/ninadkale98/koro)"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if "html" not in (resp.headers.get("Content-Type") or ""):
+                return None
+            raw = resp.read(65536).decode(resp.headers.get_content_charset() or "utf-8", "replace")
+    except Exception:
+        return None
+    m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.I | re.S)
+    title = re.sub(r"\s+", " ", html.unescape(m.group(1))).strip() if m else ""
+    return title[:200] or None
+
+
+def _where_am_i(ctx: Ctx, here: bool) -> dict:
+    """Where the item came up. Repo and folder only with --here (they may be work names)."""
+    import subprocess
+
+    out = {"device": ctx.cfg.device_id}
+    if not here:
+        return out
+    out["cwd"] = os.getcwd()
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=3)
+        if top.returncode == 0:
+            out["repo"] = os.path.basename(top.stdout.strip())
+            br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=3)
+            if br.returncode == 0:
+                out["branch"] = br.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return out
+
+
+def cmd_save(ctx: Ctx) -> None:
+    import hashlib
+    import mimetypes
+
+    a = ctx.args
+    what = " ".join(a.what).strip()
+    title, body, url, path, kind = a.title, a.note, None, None, a.kind
+    if what == "-":
+        snippet = sys.stdin.read()
+        if not snippet.strip():
+            raise KoroError("nothing to save on stdin")
+        first = next((l.strip() for l in snippet.splitlines() if l.strip()), "snippet")
+        title = title or first[:80]
+        body = f"{a.note}\n\n{snippet}" if a.note else snippet
+        kind = kind or "snippet"
+    elif URL.match(what):
+        url = what
+        kind = kind or ("pdf" if url.lower().split("?")[0].endswith(".pdf") else "url")
+        title = title or (None if a.no_fetch else page_title(url)) or url
+    elif os.path.isfile(os.path.expanduser(what)):
+        path = os.path.abspath(os.path.expanduser(what))
+        if os.path.getsize(path) > MAX_SAVED_FILE:
+            raise KoroError(f"{what} is over 50 MB; save its link or title instead")
+        kind = kind or ("pdf" if path.lower().endswith(".pdf") else "file")
+        title = title or Path(path).name
+    elif what:
+        if len(what) > 200 and not title:  # a long thought: keep it whole as the note
+            title, body = what[:80].rstrip() + "…", f"{what}\n\n{body}" if body else what
+            kind = kind or "note"
+        title = title or what
+    else:
+        raise KoroError("what should I save? e.g. koro save \"paged attention\" --note \"saw it in vLLM\"")
+
+    r = ctx.rpc("koro_save_item", learner=ctx.learner, title=title, kind=kind, body=body, url=url,
+                tags=_tags(a.tag), context=_where_am_i(ctx, a.here), client=ctx.cfg.client)
+    if path:
+        data = Path(path).read_bytes()
+        name = re.sub(r"[^\w.\-]+", "-", Path(path).name).strip("-") or "file"
+        storage = f"saved/{ctx.learner}/{r['no']}-{name}"
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        _progress(ctx, f"Uploading {Path(path).name} ({len(data) / 1e6:.1f} MB) to your private storage…")
+        ctx.client.upload(BUCKET, storage, data, mime)
+        r = ctx.rpc("koro_attach_saved_file", learner=ctx.learner, ref=str(r["no"]), bucket=BUCKET,
+                    storage_path=storage, filename=Path(path).name, mime=mime, size=len(data),
+                    sha256=hashlib.sha256(data).hexdigest())
+        r["existed"] = False
+    emit(ctx, r, render.saved_saved)
+
+
+def _saved_file(ctx: Ctx, item: dict) -> Path:
+    from . import pdf
+
+    f = item["file"]
+    target = pdf.cache_dir() / "saved" / f"{item['no']}-{f['filename']}"
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(ctx.client.download(f.get("bucket") or BUCKET, f["storage_path"]))
+    return target
+
+
+def cmd_saved(ctx: Ctx) -> None:
+    a = ctx.args
+    action, refs = a.action, list(a.refs)
+    if action and re.fullmatch(r"#?\d+", action):  # `koro saved 12` = show #12
+        action, refs = "show", [action] + refs
+    if not action or action == "list":
+        status = "all" if a.all else (a.status or "open")
+        r = ctx.rpc("koro_saved_items", learner=ctx.learner, status=status,
+                    tag=(_tags(a.tag) or [None])[0], query=a.search, limit=a.limit)
+        emit(ctx, r, render.saved_list)
+        return
+    if not refs:
+        raise KoroError(f"which item? e.g. koro saved {action} 12")
+    results = []
+    for ref in refs:
+        if action == "show":
+            results.append(ctx.rpc("koro_saved_item", learner=ctx.learner, ref=ref))
+        elif action == "open":
+            item = ctx.rpc("koro_saved_item", learner=ctx.learner, ref=ref)
+            if item.get("file"):
+                path = _saved_file(ctx, item)
+                note = _open_file(path)
+                item["path"] = str(path)
+            elif item.get("url"):
+                import webbrowser
+                note = None if webbrowser.open(item["url"]) else f"open {item['url']} in your browser"
+            else:
+                note = "nothing to open: this item is a topic or note"
+            if note:
+                item["note"] = note
+            results.append(item)
+        elif action in SAVED_STATUSES or action in ("edit", "reopen"):
+            status = "inbox" if action == "reopen" else (action if action in SAVED_STATUSES else None)
+            results.append(ctx.rpc("koro_update_saved_item", learner=ctx.learner, ref=ref, status=status,
+                                   title=a.title, note=a.note, add_tags=_tags(a.tag) or None,
+                                   remove_tags=_tags(a.untag) or None))
+        else:
+            raise KoroError(f"unknown action {action!r}: use show, open, edit, planned, learning, done, "
+                            "archived or reopen")
+    emit(ctx, results[0] if len(results) == 1 else results, render.saved_items)
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -718,6 +873,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("text")
     sp = add("time", cmd_time, "study time over the last N days")
     sp.add_argument("--days", type=int, default=7)
+
+    sp = add("save", cmd_save, "save something to learn later: a topic, question, link, file or snippet")
+    sp.add_argument("what", nargs="+", help='a topic or question ("paged attention"), a URL, a file path, '
+                                            "or - to read a snippet from stdin")
+    sp.add_argument("-n", "--note", help="why it caught your eye, where it came up")
+    sp.add_argument("-t", "--tag", action="append", help="tag (repeat, or comma-separate)")
+    sp.add_argument("--title", help="a short title (default: the topic, the page title, or the file name)")
+    sp.add_argument("--kind", choices=["topic", "question", "note", "url", "pdf", "file", "snippet"])
+    sp.add_argument("--here", action="store_true", help="also record the current repo, branch and folder")
+    sp.add_argument("--no-fetch", action="store_true", help="don't look up a link's page title")
+    sp = add("saved", cmd_saved, "things you saved to learn: list, show, open, or change their status")
+    sp.add_argument("action", nargs="?", help="show | open | edit | planned | learning | done | archived | "
+                                              "reopen (omit to list; a number alone shows that item)")
+    sp.add_argument("refs", nargs="*", help="item numbers, e.g. 12 or #12")
+    sp.add_argument("--status", choices=list(SAVED_STATUSES), help="list only this status (default: open items)")
+    sp.add_argument("--all", action="store_true", help="list everything, including done and archived")
+    sp.add_argument("-t", "--tag", action="append", help="list: filter by tag; edit: add tags")
+    sp.add_argument("--untag", action="append", help="edit: remove tags")
+    sp.add_argument("--search", help="list: search titles, notes, links and tags")
+    sp.add_argument("-n", "--note", help="edit: append a note")
+    sp.add_argument("--title", help="edit: new title")
+    sp.add_argument("--limit", type=int, default=50)
 
     con = add("connector", None, "manage the Claude connector URL (learn through claude.ai)")
     csub = con.add_subparsers(dest="connector_command", metavar="action")
