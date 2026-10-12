@@ -20,7 +20,7 @@ export type Deps = {
   now?: () => Date;
 };
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.5.0";
 const LINK_SECONDS = 3600; // signed figure links last an hour; show_figure makes a fresh one
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,6 +39,8 @@ Session loop
 6. next_concept and repeat. Every few concepts and at the end of the session, call save_learner_summary with 2-3 sentences on where they stand.
 
 Saving for later: while the learner is working or chatting, they may want to keep something to learn properly later ("save this to koro", "I want to learn X later", a link or paper). Call save_for_later right away with a clear title, the URL if there is one, a one-line note on why it came up, and 1-3 short tags; confirm in one line with its number (#12) and carry on. "What did I save?" -> list_saved, then summarize by theme instead of reading the list out. Move items along with update_saved (planned, learning, done, archived). Save ideas and public links, not proprietary code or internal documents.
+
+Feature requests: things the learner wants to build (for koro or any of their projects) are a separate list. When they say "add this feature", "feature request: ..." or "let's build this later", call add_feature right away with a short title, the project (the one they named or the conversation is clearly about; omit if unsure), and the details from the conversation (why, how it should work, examples); confirm in one line with its ref (F12) and carry on. Same title in the same project updates the open request. "What should we build tonight?" -> list_features, group by project, suggest an order with a reason for each; update_feature moves them along (planned, building, done with what shipped, dropped). Never save proprietary or internal work details.
 
 Notebook: saved things live on pages that nest (numbered 1, 1.1, 1.1.2); items without a page wait in the inbox. Each page has a markdown write-up and holds items. Before saving onto a page or writing, call notebook_toc and pick the page that fits (save_for_later with page, or file_items later). If none fits, propose a new page and where it goes before create_page, unless the learner already said where. Read with read_page (the whole page, or one section by its heading). Change only the part you mean with write_page: append (optionally under a section), replace_section, or replace_text; replace the whole write-up only when the learner asked for a rewrite. Pass if_version from your read; if the edit is refused because the page changed, read it again and redo the edit. Write markdown with ## headings for parts the learner may want to target later. Nothing is deleted: archive pages with update_page; earlier write-ups come back with write_page op restore.
 
@@ -81,6 +83,10 @@ const PAGE = {
   type: "string",
   description: "A notebook page: its number from notebook_toc (\"1.2\"), its name or a unique part of it, or a slug path (\"linux-internals/signals\").",
 };
+const FEATURE_STATUS = ["idea", "planned", "building", "done", "dropped"];
+const PRIORITY = { type: "string", enum: ["high", "normal", "low"], description: "Default normal." };
+const PROJECT = { type: "string", description: "The project it's for, e.g. \"koro\" or \"rterm\" (stored as a slug)." };
+const FEATURE_REF = { type: "integer", minimum: 1, description: "The request number, e.g. 12 for F12." };
 const WRITE_OPS = ["append", "replace_section", "replace_text", "replace", "restore"];
 const brief = (p: any) => (p ? `${p.number} ${p.title}` : null);
 
@@ -532,6 +538,86 @@ export const TOOLS: Tool[] = [
       });
     },
   },
+  // ------------------------------------------------------------------ features
+  {
+    name: "add_feature",
+    title: "Add a feature request",
+    description: "Note something the learner wants to build later, for koro or any of their projects (\"add this feature\", \"feature request: ...\", \"let's build this tonight\"). Give a short title, the project, and the details from the conversation (why, how it should work, examples; markdown, any length). The same title in the same project, while open, updates that request (existed: true). Returns it with its ref (F12).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "What to build, in a few words." },
+        details: { type: "string", description: "Why, how it should work, examples, constraints (markdown)." },
+        project: PROJECT,
+        priority: PRIORITY,
+        tags: TAGS,
+      },
+      required: ["title"],
+      additionalProperties: false,
+    },
+    annotations: { destructiveHint: false },
+    run: (ctx, a) => ctx.rpc("koro_add_feature", {
+      p_learner: ctx.learner, p_title: a.title, p_body: a.details, p_project: a.project, p_priority: a.priority,
+      p_tags: a.tags ?? [], p_context: {}, p_client: CLIENT,
+    }),
+  },
+  {
+    name: "list_features",
+    title: "Feature list",
+    description: "The learner's feature requests: by default the open ones (building, then planned, then ideas; high priority first; oldest first) with project, priority, tags and details, plus counts and open requests per project. Filter by project, status or search words. Use it for \"what should we build tonight?\".",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: PROJECT,
+        status: { type: "string", enum: ["open", "all", ...FEATURE_STATUS], description: "Default open (idea, planned, building)." },
+        search: { type: "string", description: "Words to find in titles, details and tags." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Default 100." },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    run: async (ctx, a) => {
+      const r = await ctx.rpc("koro_features", {
+        p_learner: ctx.learner, p_status: a.status ?? "open", p_project: a.project, p_query: a.search, p_limit: a.limit ?? 100,
+      });
+      return {
+        items: (r?.items ?? []).map((f: any) => ({
+          ref: f.ref ?? `F${f.no}`, title: f.title, project: f.project ?? null, status: f.status, priority: f.priority,
+          tags: f.tags ?? [], details: f.body ?? null, done_note: f.done_note ?? null, added: f.created_at,
+          from: f.context?.client ?? null,
+        })),
+        counts: r?.counts ?? {}, projects: r?.projects ?? [],
+      };
+    },
+  },
+  {
+    name: "update_feature",
+    title: "Update a feature request",
+    description: "Move a feature request along (planned, building, done, dropped, or back to idea), add to or rewrite its details, rename it, or change its project, priority or tags. With status done, done_note records what shipped (version, commit).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        feature: FEATURE_REF,
+        status: { type: "string", enum: FEATURE_STATUS },
+        title: { type: "string" },
+        add_details: { type: "string", description: "Appended to the details." },
+        replace_details: { type: "string", description: "Replaces the whole details. Only when the learner asked for a rewrite." },
+        project: { ...PROJECT, description: PROJECT.description + " Empty string: no project." },
+        priority: { type: "string", enum: ["high", "normal", "low"] },
+        add_tags: TAGS,
+        remove_tags: { type: "array", items: { type: "string" } },
+        done_note: { type: "string", description: "What shipped: version, commit, PR." },
+      },
+      required: ["feature"],
+      additionalProperties: false,
+    },
+    annotations: { destructiveHint: false },
+    run: (ctx, a) => ctx.rpc("koro_update_feature", {
+      p_learner: ctx.learner, p_ref: String(a.feature), p_status: a.status, p_title: a.title, p_note: a.add_details,
+      p_body: a.replace_details, p_project: a.project, p_priority: a.priority, p_add_tags: a.add_tags,
+      p_remove_tags: a.remove_tags, p_done_note: a.done_note,
+    }),
+  },
   // ------------------------------------------------------------------ notebook
   {
     name: "notebook_toc",
@@ -779,6 +865,13 @@ export const PROMPTS: Prompt[] = [
     text: (a) => a.page
       ? `Open page ${a.page} of my koro notebook with read_page and give me a short tour: what the write-up covers, its sub-pages and items.`
       : "Show my koro notebook: call notebook_toc with items, give me the outline briefly, and if anything waits in the inbox suggest which page each item belongs on (or a new page and where). File them with file_items once I agree.",
+  },
+  {
+    name: "build_tonight",
+    title: "Tonight's build",
+    description: "Your open feature requests by project, and what to build first.",
+    arguments: [{ name: "project", description: "Optional project, e.g. koro" }],
+    text: (a) => `What should I build tonight${a.project ? ` in ${a.project}` : ""}? Call list_features${a.project ? ` for project ${a.project}` : ""}, group the open requests by project, and suggest the two or three to build first with a reason for each (size, value, what they unblock). When I pick one, mark it building with update_feature.`,
   },
   {
     name: "progress",

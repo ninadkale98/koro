@@ -1,7 +1,7 @@
 ---
 name: koro
-description: Teach the user a book, paper or repo with koro, their headless teacher agent, and manage their learning notebook. Use when the user says /koro, wants to learn/study/continue/resume a book, asks what they were reading, wants a lesson, quiz or progress report, wants to add or parse a new source, wants to save something to learn later ("save this to koro", "remind me to learn X"), or wants to see, organize or edit their notebook pages and saved things.
-argument-hint: "[continue | start <book> [section] | status | toc | search <topic> | save <thing> | saved | notebook | page <n> | add <file.pdf> | ingest]"
+description: Teach the user a book, paper or repo with koro, their headless teacher agent, and manage their learning notebook. Use when the user says /koro, wants to learn/study/continue/resume a book, asks what they were reading, wants a lesson, quiz or progress report, wants to add or parse a new source, wants to save something to learn later ("save this to koro", "remind me to learn X"), wants to see, organize or edit their notebook pages and saved things, or wants to note a feature request to build later ("add this feature to my list", "feature request: ...", "let's build this tonight") or see and work through their feature list.
+argument-hint: "[continue | start <book> [section] | status | toc | search <topic> | save <thing> | saved | notebook | page <n> | feature <idea> | features | add <file.pdf> | ingest]"
 allowed-tools: Bash(koro *), Read(~/.cache/koro/**)
 ---
 
@@ -23,6 +23,8 @@ Arguments: $ARGUMENTS
 - `save <thing>`, "save this to koro", "I want to learn X later" → see "Saving things to learn later"
 - `saved`, "what did I save?" → `koro saved --json`
 - `notebook`, "show my notebook" → `koro notebook --json` · `page <n>` → `koro page <n> --json` (see "The notebook")
+- `feature <idea>`, "add this feature to my list", "feature request: ..." → see "Feature requests"
+- `features`, "what's on my feature list?", "what should we build tonight?" → `koro features --json`
 - `add <file>` → see "Adding a source" · `ingest` → see "Parsing a source"
 - anything else ("teach me attention", "quiz me on chapter 3"): find it with `koro search`, then teach it.
 
@@ -92,6 +94,8 @@ If `koro` is missing, install it: `pip install koro-learn` (the command is `koro
 | "What did I save?" / "anything saved about GPUs?" | `koro saved --json` (`--tag gpu`, `--search "..."`, `--all`) |
 | "Show my notebook" / "what's in my Signals page?" | `koro notebook --json` / `koro page signals --json` |
 | "Add this under 1.2" / "put it in my sigaction page" | `koro save "..." -p 1.2 --json`, or `koro page 1.2 --append - --json` for their write-up |
+| "Add this feature to koro" / "feature request: ..." | `koro feature "<what>" -P koro -n "<details>" --json` (see "Feature requests") |
+| "What should we build tonight?" | `koro features --json`, suggest an order, then `koro features building F<n> --json` |
 
 Several books: commands default to the most recent one; pass `-e "<title or id>"` otherwise.
 
@@ -143,6 +147,38 @@ page are in the inbox. Full reference: `koro guide notebook`.
   needed, say where you'll put it (number and parent) unless they already told you.
 - `--edit` opens an editor for the learner; never use it yourself.
 
+## Feature requests
+
+Things the learner wants to **build** (for koro or any of their projects) go on a separate
+list from things to learn. They say it from any tab, mid-work; it gets built later. Full
+reference: `koro guide features`.
+
+- Capture right away and confirm in one line with its number, then get back to what they
+  were doing:
+
+  ```
+  koro feature "<what to build, a few words>" -P <project> \
+    -n "<details: why, how it should work, examples, from the conversation>" [-t <tag>] [--priority high] --json
+  ```
+
+  `-P` is the project (`koro`, `rterm`, ...): the one they named, else the repo you're working
+  in (`-P .`), else the one the conversation is clearly about; leave it out if unsure. Long
+  details go on stdin: `-n - <<'EOF' ... EOF`. The same title in the same project updates the
+  open request (`existed: true`) instead of adding a second one.
+- "Add this feature" is ambiguous in a coding session: if it's not clear whether they want it
+  built now or noted for later, ask in one line. With `/koro:feature`, or "add to my feature
+  list", always just note it.
+- Only their own projects: never save proprietary or internal work details; a work idea is
+  saved as a general description at most.
+- Building later ("let's build tonight"): `koro features --json` (open requests: building,
+  then planned, then ideas; high priority first), group by project, suggest an order with a
+  reason each, and let them pick. Then `koro features building F<n>`, read it in full with
+  `koro features F<n> --json`, build it in that project's repo as usual, and when it's
+  shipped `koro features done F<n> -n "<version/commit>"`.
+- Move along: `planned`, `building`, `done`, `drop`, `reopen`; change with
+  `koro features edit F<n> -n "<more detail>" --priority high -P <project> -t <tag>`
+  (`--details -` replaces the details).
+
 ## Adding a source
 
 `koro add <file.pdf> --json` deduplicates (same file or same ISBN/arXiv id returns the
@@ -183,5 +219,6 @@ Function names and parameters match the CLI (`koro_next_concept`, `koro_status`,
 `koro_toc`, `koro_search`, `koro_mark_known`, `koro_dispute`, `koro_set_summary`,
 `koro_figure`, `koro_figures`, `koro_read_section`, `koro_save_item`, `koro_saved_items`,
 `koro_update_saved_item`, `koro_capture`, `koro_notebook`, `koro_page`, `koro_page_write`,
-`koro_page_create`, `koro_page_move`, `koro_file_items`, ...). Figure images live in the private
+`koro_page_create`, `koro_page_move`, `koro_file_items`, `koro_add_feature`, `koro_features`,
+`koro_feature`, `koro_update_feature`, ...). Figure images live in the private
 Storage bucket `koro-private`, so without the CLI describe figures from their captions.

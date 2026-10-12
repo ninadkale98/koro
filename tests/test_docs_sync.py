@@ -15,7 +15,7 @@ class DocsInSync(unittest.TestCase):
                              f"{rel} is out of date: run python tools/sync_docs.py")
 
     def test_plugin_shortcuts_point_at_learn(self):
-        for name in ("continue", "start", "status", "add", "ingest", "save", "saved", "notebook"):
+        for name in ("continue", "start", "status", "add", "ingest", "save", "saved", "notebook", "feature", "features"):
             text = (ROOT / "plugin" / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
             self.assertIn("koro:learn", text)
             self.assertIn("disable-model-invocation: true", text)

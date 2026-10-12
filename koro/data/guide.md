@@ -2,12 +2,13 @@
 
 Koro is a personal teacher that lives in the learner's own Supabase database. It holds the
 books, papers and repos they study (as lessons), every piece of evidence about what they know,
-and a notebook of things they want to learn. Koro never calls an AI model: **you, the agent,
-are the teacher.** You read lessons and progress with the `koro` CLI, teach, judge answers, and
-write evidence back. Every command takes `--json`; agents always use it.
+a notebook of things they want to learn, and a list of features they want to build. Koro
+never calls an AI model: **you, the agent, are the teacher.** You read lessons and progress
+with the `koro` CLI, teach, judge answers, and write evidence back. Every command takes
+`--json`; agents always use it.
 
 Topics (`koro guide <topic>`): setup, concepts, teach, commands-learning, books, payload,
-figures, notebook, save, json, connector, rules, commands. `koro guide` prints everything.
+figures, notebook, save, features, json, connector, rules, commands. `koro guide` prints everything.
 
 ## setup
 
@@ -258,12 +259,42 @@ koro saved edit 12 --edit                 # learner only: rewrite title and note
 Rules: koro is a personal database. Save the idea, a public link or a description in your own
 words, never proprietary code or internal documents from the learner's job.
 
+## features
+
+Feature requests are things to **build** (for koro or any of the learner's projects),
+captured mid-work from any tab and built later. A separate list from things to learn.
+
+```bash
+koro feature "<what to build>" -P <project> -n "<details>" [-t tag] [--priority high|low] --json
+koro feature "resize events" -P . --json            # -P . = the git repo you're in
+koro feature - -P koro --json < idea.md             # first line = title, the rest = details
+koro feature --edit -P koro                         # learner only: write it in an editor
+```
+- Result: `{no, ref: "F12", project, title, body, status, priority, tags, existed}`. The same
+  title in the same project, while open, is one request: details appended, tags merged.
+- Projects are slugs (`Code Praxis` becomes `code-praxis`); no project is allowed.
+
+The list and lifecycle (idea → planned → building → done, or dropped):
+```bash
+koro features --json                     # open: items[], counts{}, projects[{project,open,done}]
+koro features -P koro --search export    # filters; --status done, --all
+koro features F12 --json                 # one in full (12 and #12 work too)
+koro features planned F12 | building F12 | drop F12 | reopen F12
+koro features done F12 -n "0.5.0 (0b39786)"   # -n with done = what shipped (done_note)
+koro features edit F12 -n "more detail" --priority high -P rterm -t ui --untag x --title "..."
+koro features edit F12 --details - < spec.md  # replace the details
+```
+Open requests list building first, then planned, then ideas; high priority first; oldest
+first. For "what should we build tonight?": list, group by project, suggest an order with a
+reason, mark the pick `building`, build it, then `done` with the version or commit.
+
 ## json
 
 - `--json` prints exactly one JSON value on stdout. Errors print `{"error": "<message>"}` and
   exit with status 1; the message says what to do (e.g. which page names matched).
 - Numbers you pass back: concept keys (`2.4.1/slug`), objective keys, assessment ids, item
-  numbers (`12` or `#12`), page numbers (`1.1.2`) or names, page `version` for `--if-version`.
+  numbers (`12` or `#12`), page numbers (`1.1.2`) or names, page `version` for `--if-version`,
+  feature refs (`F12`).
 - Human output (without `--json`) is for people and may change; don't parse it.
 
 ## connector
@@ -275,7 +306,8 @@ claude.ai and Claude Desktop, with the same database. The learner gets a private
 start_book, next_concept, get_lesson, show_figure, read_section, record_answer,
 dispute_verdict, mark_known, table_of_contents, progress_report, search_book, list_library,
 set_book_status, restart_book, set_goal, save_learner_summary, study_time, save_for_later,
-list_saved, update_saved, and the notebook tools notebook_toc, read_page (whole page, one
+list_saved, update_saved, the feature tools add_feature, list_features and update_feature,
+and the notebook tools notebook_toc, read_page (whole page, one
 section, or history), write_page (op append, replace_section, replace_text, replace or
 restore, with if_version), create_page, update_page, move_page and file_items.
 save_for_later takes an optional page. The connector is deployed separately from the CLI, so

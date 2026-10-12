@@ -81,9 +81,10 @@ Tools: `continue_learning`, `start_book`, `next_concept`, `get_lesson`, `show_fi
 `read_section`, `record_answer`, `dispute_verdict`, `mark_known`, `table_of_contents`,
 `progress_report`, `search_book`, `list_library`, `set_book_status`, `restart_book`,
 `set_goal`, `save_learner_summary`, `study_time`, `save_for_later`, `list_saved`,
-`update_saved`, `notebook_toc`, `read_page`, `write_page`, `create_page`, `update_page`,
-`move_page`, `file_items`. Prompts: *Continue learning*, *Study a section*, *Quiz me*,
-*What did I save?*, *My notebook*, *How am I doing?*
+`update_saved`, `add_feature`, `list_features`, `update_feature`, `notebook_toc`,
+`read_page`, `write_page`, `create_page`, `update_page`, `move_page`, `file_items`. Prompts:
+*Continue learning*, *Study a section*, *Quiz me*, *What did I save?*, *Tonight's build*,
+*My notebook*, *How am I doing?*
 
 Manage URLs with `koro connector list` and `koro connector revoke <id>`. Only a SHA-256 hash
 of each token is stored. Opening the URL in a browser shows a small status page; add
@@ -145,6 +146,25 @@ under Signals", "add this example to the EINTR part of my signals page", "show m
 
 Coming next: turning saved items and notebook pages into a curriculum and teaching it.
 
+## Feature requests: build them later
+
+Ideas for things to build (for koro or any of your projects) get their own list, separate
+from things to learn. Say it from any tab while you're working, and pick them up at night.
+
+```bash
+koro feature "save feature requests from any tab" -P koro -n "so I can build them at night"
+koro feature "resize events" -P . --priority high     # -P . = the git repo you're in
+koro features                     # open requests by project: building, planned, then ideas
+koro features F3                  # one in full
+koro features building F3         # tonight's build; also planned, drop, reopen
+koro features done F3 -n "shipped in 0.5.0"
+```
+
+In Claude Code: `/koro:feature <idea>` (or "add this to my feature list") and, at night,
+`/koro:features` or "what should we build tonight?". In a Claude chat with the connector:
+"feature request: ..." or the *Tonight's build* prompt. The same title in the same project
+updates one request instead of adding a duplicate.
+
 ## The guide (for you and for any agent)
 
 `koro guide` prints the complete manual: concepts, the teaching loop, every command with an
@@ -189,6 +209,8 @@ From a plain terminal:
 | `koro page <page>` / `page new "<title>" -p <parent>` | read a page; make one |
 | `koro page <page> --append / --section --with / --replace --with` | change just one part of a write-up |
 | `koro file 3 4 <page>` | put saved items on a page (or `inbox`) |
+| `koro feature "<idea>" -P <project> -n "details"` | note a feature request to build later |
+| `koro features` / `features F3` / `features done F3` | your feature list by project; show one; move it along |
 | `koro guide [topic]` | the full manual, for people and agents |
 
 Add `--json` to any command for machine-readable output (agents always use it). With several
@@ -259,7 +281,7 @@ koro/                    Python CLI (pypdf, pdfplumber)
   payload.py             lesson payload validator (incl. copy check)
   data/                  the agent skill, the guide (`koro guide`) and payload spec shipped with the CLI
 plugin/                  Claude Code plugin (skills: learn, continue, start, status, add, ingest,
-                         save, saved, notebook)
+                         save, saved, notebook, feature, features)
 .claude-plugin/          marketplace manifest
 supabase/migrations/     schema + functions (applied to the koro project)
 supabase/functions/koro-mcp/  the claude.ai connector (remote MCP server, Deno, no deps)

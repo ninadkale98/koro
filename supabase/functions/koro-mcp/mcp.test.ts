@@ -50,6 +50,11 @@ const SIGNATURES: Record<string, string[]> = {
   koro_page_update: ["p_learner", "p_ref", "p_title", "p_status", "p_add_tags", "p_remove_tags"],
   koro_page_move: ["p_learner", "p_ref", "p_parent", "p_after", "p_top"],
   koro_file_items: ["p_learner", "p_items", "p_page"],
+  koro_add_feature: ["p_learner", "p_title", "p_body", "p_project", "p_priority", "p_tags", "p_context", "p_client"],
+  koro_features: ["p_learner", "p_status", "p_project", "p_query", "p_limit"],
+  koro_feature: ["p_learner", "p_ref"],
+  koro_update_feature: ["p_learner", "p_ref", "p_status", "p_title", "p_note", "p_body", "p_project", "p_priority",
+    "p_add_tags", "p_remove_tags", "p_done_note"],
 };
 // Parameters without a default: the rpc must always send them (makeRpc drops null/undefined).
 const REQUIRED: Record<string, string[]> = {
@@ -141,6 +146,12 @@ const CANNED: Record<string, unknown> = {
   koro_page_update: { number: "1.1", status: "done" },
   koro_page_move: { number: "2" },
   koro_file_items: { page: { number: "1.1", title: "Signals" }, items: [{ no: 3 }, { no: 4 }] },
+  koro_add_feature: { no: 3, ref: "F3", project: "koro", title: "Feature list", status: "idea", priority: "normal", existed: false },
+  koro_features: { items: [{ no: 3, ref: "F3", project: "koro", title: "Feature list", status: "building", priority: "high",
+                             tags: ["cli"], body: "from any tab", context: { client: "cli" }, created_at: "2026-10-12T21:00:00Z" },
+                           { no: 4, title: "Loose idea", status: "idea", priority: "normal", context: {}, created_at: "2026-10-12T21:00:00Z" }],
+                   counts: { idea: 1, planned: 0, building: 1, done: 0, dropped: 0 }, projects: [{ project: "koro", open: 1, done: 0 }] },
+  koro_update_feature: { no: 3, ref: "F3", status: "done" },
 };
 
 function setup(overrides: Record<string, unknown> = {}, storage?: Storage) {
@@ -689,4 +700,41 @@ test("the notebook prompt and instructions", async () => {
   for (const tool of ["notebook_toc", "read_page", "write_page", "create_page", "file_items", "update_page", "if_version"]) {
     assert.ok(INSTRUCTIONS.includes(tool), tool);
   }
+});
+
+test("add_feature, list_features, update_feature", async () => {
+  const { call, last } = setup();
+  const added = payload(await call("add_feature", { title: "Feature list", details: "save from any tab", project: "koro",
+    priority: "high", tags: ["cli"] }));
+  assert.equal(added.ref, "F3");
+  assert.deepEqual(last("koro_add_feature"), { p_learner: L, p_title: "Feature list", p_body: "save from any tab",
+    p_project: "koro", p_priority: "high", p_tags: ["cli"], p_context: {}, p_client: "connector" });
+  await call("add_feature", { title: "x" });
+  assert.deepEqual(last("koro_add_feature"), { p_learner: L, p_title: "x", p_tags: [], p_context: {}, p_client: "connector" });
+  assert.match((await call("add_feature", { title: "x", priority: "urgent" })).result.content[0].text, /priority must be one of/);
+
+  const list = payload(await call("list_features"));
+  assert.deepEqual(last("koro_features"), { p_learner: L, p_status: "open", p_limit: 100 });
+  assert.deepEqual(list.items[0], { ref: "F3", title: "Feature list", project: "koro", status: "building", priority: "high",
+    tags: ["cli"], details: "from any tab", done_note: null, added: "2026-10-12T21:00:00Z", from: "cli" });
+  assert.equal(list.items[1].ref, "F4");
+  assert.equal(list.items[1].project, null);
+  assert.equal(list.projects[0].open, 1);
+  await call("list_features", { project: "koro", status: "done", search: "tab", limit: 5 });
+  assert.deepEqual(last("koro_features"), { p_learner: L, p_status: "done", p_project: "koro", p_query: "tab", p_limit: 5 });
+
+  await call("update_feature", { feature: 3, status: "done", done_note: "0.5.0" });
+  assert.deepEqual(last("koro_update_feature"), { p_learner: L, p_ref: "3", p_status: "done", p_done_note: "0.5.0" });
+  await call("update_feature", { feature: 3, add_details: "more", replace_details: "all", project: "", priority: "low",
+    add_tags: ["a"], remove_tags: ["b"], title: "T" });
+  assert.deepEqual(last("koro_update_feature"), { p_learner: L, p_ref: "3", p_title: "T", p_note: "more", p_body: "all",
+    p_project: "", p_priority: "low", p_add_tags: ["a"], p_remove_tags: ["b"] });
+  assert.match((await call("update_feature", { feature: "F3" })).result.content[0].text, /feature must be an integer/);
+});
+
+test("the build_tonight prompt and feature instructions", async () => {
+  const { post } = setup();
+  const got = (await post({ jsonrpc: "2.0", id: 2, method: "prompts/get", params: { name: "build_tonight", arguments: { project: "koro" } } })).body.result;
+  assert.match(got.messages[0].content.text, /list_features for project koro/);
+  for (const tool of ["add_feature", "list_features", "update_feature"]) assert.ok(INSTRUCTIONS.includes(tool), tool);
 });

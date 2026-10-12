@@ -452,3 +452,71 @@ def filed(r: dict) -> str:
     where = f"page {pg['number']} {pg['title']}" if pg else "the inbox"
     nums = ", ".join(f"#{i['no']}" for i in r.get("items") or [])
     return f"Moved {nums} to {where}."
+
+
+# ---------------------------------------------------------------------------
+# Feature requests: things to build
+# ---------------------------------------------------------------------------
+FEATURE_MARK = {"idea": "○", "planned": "◇", "building": "▶", "done": "✓", "dropped": "–"}
+
+
+def feature_line(f: dict, show_project: bool = True) -> str:
+    prio = {"high": " !", "low": " ↓"}.get(f.get("priority"), "")
+    head = f"{FEATURE_MARK.get(f.get('status'), ' ')} F{f['no']:<4} {f['title']}{prio}"
+    tags = " ".join("#" + t for t in f.get("tags") or [])
+    proj = (f.get("project") or "no project") if show_project else ""
+    when = (f"done {_ago(f['done_at'])}" if f.get("status") == "done" and f.get("done_at")
+            else _ago(f.get("created_at", "")))
+    tail = "  ".join(x for x in (proj, tags, when) if x)
+    return f"{head}\n        {tail}" if tail else head
+
+
+def feature_saved(f: dict) -> str:
+    if f.get("saved") is False:
+        return "Nothing saved."
+    verb = "Already on the list, updated" if f.get("existed") else "Added"
+    proj = f" to {f['project']}" if f.get("project") else ""
+    return (f"{verb} F{f['no']}{proj}: {f['title']}"
+            + {"high": "  (high priority)", "low": "  (low priority)"}.get(f.get("priority"), "")
+            + "\nSee the list with `koro features`.")
+
+
+def features_list(r: dict) -> str:
+    items = r.get("items") or []
+    c = r.get("counts") or {}
+    f = r.get("filter") or {}
+    head = (f"Features: {c.get('building', 0)} building, {c.get('planned', 0)} planned, "
+            f"{c.get('idea', 0)} ideas, {c.get('done', 0)} done")
+    if not items:
+        return head + "\n\nNothing here" + (" for that filter." if f.get("project") or f.get("query") else
+                                            ". Add one with: koro feature \"<what to build>\" -P <project> -n \"details\"")
+    out = [head]
+    if f.get("project"):
+        out += ["", f"{f['project']}:"] + [feature_line(x, show_project=False) for x in items]
+    else:
+        groups: dict = {}
+        for x in items:
+            groups.setdefault(x.get("project") or "", []).append(x)
+        for proj, rows in groups.items():
+            out += ["", f"{proj or 'no project'}:"] + [feature_line(x, show_project=False) for x in rows]
+    out.append("\n▶ building  ◇ planned  ○ idea  ✓ done  ! high priority   ·  "
+               "koro features <n> to see one, koro features building <n>, koro features done <n>")
+    return "\n".join(out)
+
+
+def feature_item(f: dict) -> str:
+    out = [feature_line(f)]
+    if f.get("body"):
+        out += [""] + _verbatim(f["body"])
+    if f.get("done_note"):
+        out += ["", "  shipped: " + f["done_note"]]
+    ctx = {k: v for k, v in (f.get("context") or {}).items() if v}
+    if ctx:
+        out += ["", "  from: " + ", ".join(f"{k} {v}" for k, v in ctx.items())]
+    if f.get("note"):
+        out.append(f"  {f['note']}")
+    return "\n".join(out)
+
+
+def feature_items(r) -> str:
+    return "\n\n".join(feature_item(f) for f in (r if isinstance(r, list) else [r]))

@@ -952,6 +952,109 @@ def cmd_file(ctx: Ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Feature requests: things to build, captured from any tab, built later
+# ---------------------------------------------------------------------------
+FEATURE_STATUSES = ("idea", "planned", "building", "done", "dropped")
+FEATURE_ACTIONS = {"idea": "idea", "reopen": "idea", "planned": "planned", "plan": "planned",
+                   "building": "building", "start": "building", "done": "done", "drop": "dropped",
+                   "dropped": "dropped"}
+
+
+def _project(value: Optional[str]) -> Optional[str]:
+    """-P . means the git repo you're in."""
+    if value != ".":
+        return value
+    import subprocess
+
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        top = None
+    if not top or top.returncode != 0:
+        raise KoroError("-P . means the git repo you're in, but this folder isn't in one: name the project")
+    return os.path.basename(top.stdout.strip())
+
+
+def cmd_feature(ctx: Ctx) -> None:
+    a = ctx.args
+    what = " ".join(a.what).strip()
+    title, body = a.title, _read_value(a.note) if a.note == "-" and what != "-" else a.note
+    if not what and not a.edit:
+        raise KoroError('what should koro build? e.g. koro feature "save feature requests from any tab" -P koro '
+                        '-n "details" (or koro feature --edit to write it in your editor)')
+    if what == "-":  # first line = title, the rest = details
+        if a.note == "-":
+            raise KoroError("only one of the text and --note can come from stdin")
+        text = sys.stdin.read()
+        if not text.strip():
+            raise KoroError("nothing on stdin")
+        first, rest = _title_and_body(text.strip("\n"))
+        title = title or first[:200]
+        body = "\n\n".join(x for x in (body, rest if title == first[:200] else text.strip("\n")) if x)
+    elif what:
+        if len(what) > 200 and not title:  # a long request: keep it whole as the details
+            title, body = what[:80].rstrip() + "…", f"{what}\n\n{body}" if body else what
+        title = title or what
+    if a.edit:
+        text = open_in_editor(f"{title or ''}\n\n{body or ''}", [
+            "First line: what to build, in a few words. Below it: the details, as long as you like",
+            "(why, how it should work, examples). Save and close to keep it; delete everything to cancel."])
+        if text is None:
+            emit(ctx, {"saved": False}, render.feature_saved)
+            return
+        title, body = _title_and_body(text)
+        if not title:
+            raise KoroError("the first line (what to build) is empty")
+    r = ctx.rpc("koro_add_feature", learner=ctx.learner, title=title, body=body, project=_project(a.project),
+                priority=a.priority, tags=_tags(a.tag), context=_where_am_i(ctx, a.here), client=ctx.cfg.client)
+    emit(ctx, r, render.feature_saved)
+
+
+def cmd_features(ctx: Ctx) -> None:
+    a = ctx.args
+    action, refs = a.action, list(a.refs)
+    if action and re.fullmatch(r"[#fF]?\d+", action):  # `koro features 12` / `F12` = show it
+        action, refs = "show", [action] + refs
+    if not action or action == "list":
+        status = "all" if a.all else (a.status or "open")
+        r = ctx.rpc("koro_features", learner=ctx.learner, status=status, project=_project(a.project),
+                    query=a.search, limit=a.limit)
+        emit(ctx, r, render.features_list)
+        return
+    if not refs:
+        raise KoroError(f"which feature? e.g. koro features {action} F12")
+    results = []
+    for ref in refs:
+        if action == "show":
+            results.append(ctx.rpc("koro_feature", learner=ctx.learner, ref=ref))
+        elif action == "edit" and a.edit:
+            f = ctx.rpc("koro_feature", learner=ctx.learner, ref=ref)
+            before = f"{f['title']}\n\n{f.get('body') or ''}"
+            text = open_in_editor(before, [
+                f"Editing F{f['no']}. First line: what to build. Below it: the details.",
+                "Save and close to keep your changes; delete everything to leave it as it was."])
+            if text is None or text == before.strip("\n"):
+                f["note"] = "unchanged"
+                results.append(f)
+                continue
+            new_title, new_body = _title_and_body(text)
+            results.append(ctx.rpc("koro_update_feature", learner=ctx.learner, ref=ref, title=new_title,
+                                   body=new_body, project=_project(a.project), priority=a.priority,
+                                   add_tags=_tags(a.tag) or None, remove_tags=_tags(a.untag) or None))
+        elif action in FEATURE_ACTIONS or action == "edit":
+            status = FEATURE_ACTIONS.get(action)
+            note = _read_value(a.note)
+            results.append(ctx.rpc(
+                "koro_update_feature", learner=ctx.learner, ref=ref, status=status, title=a.title,
+                note=None if status == "done" else note, done_note=note if status == "done" else None,
+                body=_read_value(a.details), project=_project(a.project), priority=a.priority,
+                add_tags=_tags(a.tag) or None, remove_tags=_tags(a.untag) or None))
+        else:
+            raise KoroError(f"unknown action {action!r}: use show, edit, planned, building, done, drop or reopen")
+    emit(ctx, results[0] if len(results) == 1 else results, render.feature_items)
+
+
+# ---------------------------------------------------------------------------
 # The guide: everything an agent (or a person) needs, from the CLI itself
 # ---------------------------------------------------------------------------
 def guide_sections() -> tuple:
@@ -1070,6 +1173,24 @@ NOTEBOOK_EXAMPLES = """examples:
   koro notebook                 # every page with its number, status and item count, plus the inbox
   koro notebook 1.1 --items     # one branch, with the items on each page
   koro notebook inbox --items   # what's waiting to be filed
+"""
+
+FEATURE_EXAMPLES = """examples:
+  koro feature "save feature requests from any tab" -P koro -n "so I can build them at night"
+  koro feature "dark mode for the status page" -P . --priority low    # -P . = the repo you're in
+  koro feature - -P rterm < idea.md          # first line = what to build, the rest = details
+  koro feature --edit -P koro                # write it in your editor
+"""
+
+FEATURES_EXAMPLES = """examples:
+  koro features                        # open requests by project: building, planned, then ideas
+  koro features -P koro                # one project
+  koro features F12                    # one request in full
+  koro features building F12           # tonight's build (also: planned, done, drop, reopen)
+  koro features done F12 -n "shipped in 0.5.0 (0b39786)"
+  koro features edit F12 -n "one more detail" --priority high -P rterm
+  koro features edit F12 --details - < spec.md    # replace the details
+  koro features --status done          # what shipped
 """
 
 PAGE_EXAMPLES = """examples:
@@ -1288,6 +1409,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("file", cmd_file, "move saved items onto a notebook page (or back to the inbox)")
     sp.add_argument("args", nargs="+", help="<item numbers...> <page or inbox>, e.g. 3 4 1.1.2")
+
+    sp = add("feature", cmd_feature, "add a feature request: something to build later, for any project",
+             description="Add a feature request to build later. Same title in the same project, while open, "
+                         "updates the existing request instead of adding a second one.",
+             epilog=FEATURE_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp.add_argument("what", nargs="*", help="what to build, in a few words (or - to read it from stdin: "
+                                            "first line the title, the rest the details)")
+    sp.add_argument("-n", "--note", help="the details: why, how it should work, examples (any length; - reads stdin)")
+    sp.add_argument("-P", "--project", help="which project it's for, e.g. koro, rterm (. = the git repo you're in)")
+    sp.add_argument("--priority", choices=["high", "normal", "low"], help="default normal")
+    sp.add_argument("-t", "--tag", action="append", help="tag (repeat, or comma-separate)")
+    sp.add_argument("--title", help="a short title, when the text is long")
+    sp.add_argument("--edit", action="store_true", help="write the title and details in your editor")
+    sp.add_argument("--here", action="store_true", help="also record the current repo, branch and folder")
+    sp = add("features", cmd_features, "your feature requests: list, show, or move them along (idea → building → done)",
+             epilog=FEATURES_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp.add_argument("action", nargs="?", help="show | edit | planned | building | done | drop | reopen "
+                                              "(omit to list; a number alone, e.g. F12, shows that request)")
+    sp.add_argument("refs", nargs="*", help="request numbers, e.g. F12, 12 or #12")
+    sp.add_argument("--status", choices=list(FEATURE_STATUSES), help="list only this status (default: open requests)")
+    sp.add_argument("--all", action="store_true", help="list everything, including done and dropped")
+    sp.add_argument("-P", "--project", help="list: only this project; edit: move it to this project (. = this repo)")
+    sp.add_argument("--search", help="list: search titles, details and tags")
+    sp.add_argument("-n", "--note", help="append to the details; with done, what shipped (- reads stdin)")
+    sp.add_argument("--details", help="edit: replace the whole details (- reads stdin)")
+    sp.add_argument("--title", help="edit: new title")
+    sp.add_argument("--priority", choices=["high", "normal", "low"], help="edit: change the priority")
+    sp.add_argument("-t", "--tag", action="append", help="edit: add tags")
+    sp.add_argument("--untag", action="append", help="edit: remove tags")
+    sp.add_argument("--edit", action="store_true", help="edit: rewrite the title and details in your editor")
+    sp.add_argument("--limit", type=int, default=100, help="list: at most this many (default 100)")
 
     con = add("connector", None, "manage the Claude connector URL (learn through claude.ai)")
     csub = con.add_subparsers(dest="connector_command", metavar="action")
